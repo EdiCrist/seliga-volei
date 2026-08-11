@@ -1298,7 +1298,7 @@ async function openPixPayment(playerId){
 
   const paymentLock = getPaymentLockInfo(session);
   if(!paymentLock.open && !isAdmin){
-    showToast(`Pagamento libera às ${paymentLock.openTime.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})} (faltam ${formatCountdown(paymentLock.msLeft)}), ou assim que a lista bater o limite.`);
+    showToast(`Pagamento libera às ${(paymentLock.openTime ? paymentLock.openTime.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : '--:--')} (faltam ${formatCountdown(paymentLock.msLeft)}), ou assim que a lista bater o limite.`);
     return;
   }
 
@@ -1573,7 +1573,7 @@ function openReceiptModal(preselectPlayerId){
   if(!session){ showToast('Ainda não tem um jogo criado.'); return; }
   const paymentLock = getPaymentLockInfo(session);
   if(!paymentLock.open && !isAdmin){
-    showToast(`Pagamento libera às ${paymentLock.openTime.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})} (faltam ${formatCountdown(paymentLock.msLeft)}), ou assim que a lista bater o limite.`);
+    showToast(`Pagamento libera às ${(paymentLock.openTime ? paymentLock.openTime.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : '--:--')} (faltam ${formatCountdown(paymentLock.msLeft)}), ou assim que a lista bater o limite.`);
     return;
   }
   receiptContext = 'session';
@@ -1925,7 +1925,7 @@ function getSessionDateTime(session){
 function getLockInfo(session){
   const gameTime = getSessionDateTime(session);
   const lockHours = (DATA.config.lockHoursBefore !== undefined) ? DATA.config.lockHoursBefore : 3;
-  if(!gameTime || !lockHours){
+  if(!gameTime){
     return { locked:false, lockTime:null, gameTime, msLeft:null };
   }
   const lockTime = new Date(gameTime.getTime() - lockHours * 60 * 60 * 1000);
@@ -1951,7 +1951,7 @@ function getPaymentLockInfo(session){
   const target = session.targetHeadcount || (DATA.config && DATA.config.limit) || 18;
   const reachedTarget = confirmedCount >= target;
 
-  if(!gameTime || !paymentHours || reachedTarget){
+  if(!gameTime || reachedTarget){
     return { open:true, openTime:null, gameTime, msLeft:null, reachedTarget };
   }
   const openTime = new Date(gameTime.getTime() - paymentHours * 60 * 60 * 1000);
@@ -2129,7 +2129,7 @@ function render(){
     if(lockInfo.gameTime){
       lockBanner = lockInfo.locked
         ? `<div class="card" style="background:rgba(201,67,46,0.08); border:1px solid rgba(201,67,46,0.25);">🔒 <b>Lista trancada.</b> Ninguém consegue mais desistir ou confirmar presença sozinho — só o organizador.</div>`
-        : `<div class="card" style="opacity:0.75; font-size:12.5px;">🔓 A lista tranca automaticamente às <b>${lockInfo.lockTime.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</b> (faltam ${formatCountdown(lockInfo.msLeft)}).</div>`;
+        : `<div class="card" style="opacity:0.75; font-size:12.5px;">🔓 A lista tranca automaticamente às <b>${(lockInfo.lockTime ? lockInfo.lockTime.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : '--:--')}</b> (faltam ${formatCountdown(lockInfo.msLeft)}).</div>`;
     }
 
     let html = lockBanner;
@@ -2361,7 +2361,7 @@ function render(){
       if(paymentLock.reachedTarget){
         paymentLockCard = `<div class="card" style="opacity:0.75; font-size:12.5px;">🔓 Lista bateu o limite — pagamento já liberado pra todo mundo.</div>`;
       } else if(!paymentLock.open){
-        paymentLockCard = `<div class="card" style="border:1px solid rgba(255,107,107,0.3);">🔒 Pagamento libera às <b>${paymentLock.openTime.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</b> (faltam ${formatCountdown(paymentLock.msLeft)}), ou antes se a lista bater o limite.</div>`;
+        paymentLockCard = `<div class="card" style="border:1px solid rgba(255,107,107,0.3);">🔒 Pagamento libera às <b>${(paymentLock.openTime ? paymentLock.openTime.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : '--:--')}</b> (faltam ${formatCountdown(paymentLock.msLeft)}), ou antes se a lista bater o limite.</div>`;
       } else {
         paymentLockCard = `<div class="card" style="opacity:0.75; font-size:12.5px;">🔓 Pagamento liberado.</div>`;
       }
@@ -2389,7 +2389,7 @@ function render(){
         <div class="row-actions">
           ${hasPendingPix ? `<button class="btn btn-ghost btn-sm" onclick="checkAllPendingPix()">🔄 Verificar Pix agora</button>` : ''}
           ${locked
-            ? `<span class="status-pill pill-wait" style="flex:1; text-align:center;">🔒 libera às ${paymentLock.openTime.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</span>`
+            ? `<span class="status-pill pill-wait" style="flex:1; text-align:center;">🔒 libera às ${(paymentLock.openTime ? paymentLock.openTime.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : '--:--')}</span>`
             : `<button class="btn btn-coral btn-sm" onclick="openPixPayment('${p.id}')">💳 ${hasPendingPix ? 'Gerar novo Pix' : 'Pagar Pix'}</button>
                <button class="btn btn-teal btn-sm" onclick="openReceiptModal('${p.id}')">📎 Comprovante</button>`
           }
