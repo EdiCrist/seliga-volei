@@ -400,6 +400,11 @@
       <input id="cfgAvulsoRate" type="number" inputmode="decimal" placeholder="20">
     </div>
     <div class="field">
+      <label>Taxa do Mercado Pago no Pix automático (%)</label>
+      <input id="cfgMpFee" type="number" inputmode="decimal" step="0.1" placeholder="2">
+      <p class="receipt-note">Embutida só no valor cobrado pelo botão "Pagar Pix" — assim o que sobra na sua conta depois da taxa bate certinho com o valor que a pessoa devia. Pagamento manual (comprovante) não tem essa taxa.</p>
+    </div>
+    <div class="field">
       <label>Valor da quadra por hora (R$)</label>
       <input id="cfgHourlyRate" type="number" inputmode="decimal" placeholder="130">
       <p class="receipt-note">Usado pra calcular sozinho o valor total ao escolher o horário de um jogo (ex: 1h30 de jogo = 1,5x esse valor). Só vale no modo "por jogo".</p>
@@ -639,6 +644,7 @@ async function loadData(){
   if(DATA.config.hourlyRate === undefined) DATA.config.hourlyRate = 130;
   if(DATA.config.paymentMode === undefined) DATA.config.paymentMode = 'avulso';
   if(DATA.config.avulsoRate === undefined) DATA.config.avulsoRate = 20;
+  if(DATA.config.mpFeePercent === undefined) DATA.config.mpFeePercent = 2;
   if(DATA.months === undefined) DATA.months = [];
   if(DATA.currentMonthId === undefined) DATA.currentMonthId = null;
   if(DATA.caixinha === undefined) DATA.caixinha = 0;
@@ -1057,6 +1063,19 @@ async function createMonth(){
   showToast('Mensalidade criada!');
 }
 
+async function deleteMonth(){
+  requireAdmin('deleteMonth', async ()=>{
+    const month = getCurrentMonth();
+    if(!month) return;
+    if(!confirm(`Excluir a mensalidade "${month.label}"? Isso apaga os pagamentos registrados dela. Não dá pra desfazer.`)) return;
+    DATA.months = DATA.months.filter(m => m.id !== month.id);
+    DATA.currentMonthId = DATA.months.length ? DATA.months[0].id : null;
+    await saveData();
+    render();
+    showToast('Mensalidade excluída.');
+  });
+}
+
 function monthEntryFor(month, playerId){
   if(!month.payments[playerId]) month.payments[playerId] = { paid: false };
   return month.payments[playerId];
@@ -1296,13 +1315,16 @@ async function openPixPayment(playerId){
     }
     return;
   }
+  const chargeAmount = grossUpForMpFee(amount);
 
   pixCurrentPlayerId = playerId;
   pixCurrentPaymentId = null;
   document.getElementById('pixLoading').style.display = 'block';
   document.getElementById('pixContent').style.display = 'none';
   document.getElementById('pixError').style.display = 'none';
-  document.getElementById('pixSub').textContent = `Cobrança de ${p.name} — escaneie o QR code ou copie o código.`;
+  document.getElementById('pixSub').textContent = chargeAmount > amount
+    ? `Cobrança de ${p.name} — R$ ${chargeAmount.toFixed(2)} (inclui a taxa do Mercado Pago sobre os R$ ${amount.toFixed(2)} devidos).`
+    : `Cobrança de ${p.name} — escaneie o QR code ou copie o código.`;
   openModal('modalPix');
 
   const dateLabel = formatDate(session.date);
@@ -1311,7 +1333,7 @@ async function openPixPayment(playerId){
   try{
     const result = await callApi(url, {
       action: 'createPixCharge',
-      amount: amount,
+      amount: chargeAmount,
       description: `seLIGA Vôlei Amador - ${p.name} - ${dateLabel}`
     });
     if(!result || !result.ok){
@@ -1325,7 +1347,7 @@ async function openPixPayment(playerId){
     document.getElementById('pixContent').style.display = 'block';
     const entryForPending = entryFor(session, playerId);
     if(entryForPending){
-      entryForPending.pendingPix = { paymentId: result.payment.id, amount: amount, createdAt: Date.now() };
+      entryForPending.pendingPix = { paymentId: result.payment.id, amount: chargeAmount, createdAt: Date.now() };
       await saveData(); // grava na hora, pra qualquer aparelho poder confirmar depois, mesmo se essa tela fechar
     }
     startPixPolling();
@@ -1352,20 +1374,23 @@ async function openMonthPixPayment(playerId){
     showToast(`${p.name} tinha saldo suficiente — pago automaticamente, sem cobrança! 💚`);
     return;
   }
+  const chargeAmount = grossUpForMpFee(amount);
 
   pixCurrentPlayerId = playerId;
   pixCurrentPaymentId = null;
   document.getElementById('pixLoading').style.display = 'block';
   document.getElementById('pixContent').style.display = 'none';
   document.getElementById('pixError').style.display = 'none';
-  document.getElementById('pixSub').textContent = `Mensalidade de ${p.name} (${month.label}) — escaneie o QR code ou copie o código.`;
+  document.getElementById('pixSub').textContent = chargeAmount > amount
+    ? `Mensalidade de ${p.name} (${month.label}) — R$ ${chargeAmount.toFixed(2)} (inclui a taxa do Mercado Pago sobre os R$ ${amount.toFixed(2)} devidos).`
+    : `Mensalidade de ${p.name} (${month.label}) — escaneie o QR code ou copie o código.`;
   openModal('modalPix');
 
   const url = getApiUrl();
   try{
     const result = await callApi(url, {
       action: 'createPixCharge',
-      amount: amount,
+      amount: chargeAmount,
       description: `seLIGA Vôlei Amador - Mensalidade ${month.label} - ${p.name}`
     });
     if(!result || !result.ok){
@@ -1378,7 +1403,7 @@ async function openMonthPixPayment(playerId){
     document.getElementById('pixLoading').style.display = 'none';
     document.getElementById('pixContent').style.display = 'block';
     const entry = monthEntryFor(month, playerId);
-    entry.pendingPix = { paymentId: result.payment.id, amount: amount, createdAt: Date.now() };
+    entry.pendingPix = { paymentId: result.payment.id, amount: chargeAmount, createdAt: Date.now() };
     await saveData();
     startPixPolling();
   }catch(e){
@@ -1751,6 +1776,19 @@ function calcAmountDue(baseAmount, playerId){
   return net < 0 ? 0 : net;
 }
 
+/**
+ * "Engorda" o valor cobrado no Pix automático pra cobrir a taxa do
+ * Mercado Pago, de forma que o valor líquido que sobra na conta depois
+ * da taxa bata exatamente com o que a pessoa devia (netAmount).
+ * Só usado no momento de gerar a cobrança — o valor "devido" mostrado
+ * na tela e usado nos cálculos de saldo continua sem taxa nenhuma.
+ */
+function grossUpForMpFee(netAmount){
+  const feePercent = (DATA.config && DATA.config.mpFeePercent !== undefined) ? DATA.config.mpFeePercent : 2;
+  if(!feePercent || netAmount <= 0) return netAmount;
+  return roundCents(netAmount / (1 - feePercent/100));
+}
+
 function applyPaymentToBalance(baseAmount, record, playerId){
   const player = DATA.players.find(p=>p.id===playerId);
   const net = calcAmountDue(baseAmount, playerId);
@@ -1826,6 +1864,7 @@ function openConfig(){
     document.getElementById('cfgLimit').value = DATA.config.limit || 18;
     document.getElementById('cfgHourlyRate').value = DATA.config.hourlyRate || 130;
     document.getElementById('cfgAvulsoRate').value = DATA.config.avulsoRate || 20;
+    document.getElementById('cfgMpFee').value = DATA.config.mpFeePercent !== undefined ? DATA.config.mpFeePercent : 2;
     document.getElementById('cfgLockHours').value = DATA.config.lockHoursBefore !== undefined ? DATA.config.lockHoursBefore : 3;
     document.getElementById('cfgPaymentLockHours').value = DATA.config.paymentLockHoursBefore !== undefined ? DATA.config.paymentLockHoursBefore : 4;
     document.getElementById('cfgNewPin').value = '';
@@ -1863,6 +1902,8 @@ async function saveConfig(){
   DATA.config.limit = parseInt(document.getElementById('cfgLimit').value) || 18;
   DATA.config.hourlyRate = parseFloat(document.getElementById('cfgHourlyRate').value) || 130;
   DATA.config.avulsoRate = parseFloat(document.getElementById('cfgAvulsoRate').value) || 20;
+  DATA.config.mpFeePercent = parseFloat(document.getElementById('cfgMpFee').value);
+  if(isNaN(DATA.config.mpFeePercent) || DATA.config.mpFeePercent < 0) DATA.config.mpFeePercent = 0;
   DATA.config.paymentMode = selectedPaymentMode;
   DATA.config.lockHoursBefore = parseFloat(document.getElementById('cfgLockHours').value);
   if(isNaN(DATA.config.lockHoursBefore) || DATA.config.lockHoursBefore < 0) DATA.config.lockHoursBefore = 0;
@@ -2092,6 +2133,21 @@ function render(){
     }
 
     let html = lockBanner;
+
+    if(DATA.config.paymentMode === 'mensal'){
+      const totalMensalistas = DATA.players.filter(p=>p.isMensalista).length;
+      const confirmedMensalistas = confirmed.filter(e=>{
+        const p = DATA.players.find(p=>p.id===e.playerId);
+        return p && p.isMensalista;
+      }).length;
+      const confirmedAvulsos = confirmed.length - confirmedMensalistas;
+      html += `<div class="card" style="opacity:0.85; font-size:12.5px;">
+        📅 Mensalistas confirmados hoje: <b>${confirmedMensalistas}/${totalMensalistas}</b>
+        ${totalMensalistas - confirmedMensalistas > 0 ? ` · ${totalMensalistas - confirmedMensalistas} vaga${totalMensalistas - confirmedMensalistas>1?'s':''} de fixo aberta${totalMensalistas - confirmedMensalistas>1?'s':''} hoje` : ''}
+        ${confirmedAvulsos > 0 ? ` · ${confirmedAvulsos} avulso${confirmedAvulsos>1?'s':''} confirmado${confirmedAvulsos>1?'s':''}` : ''}
+      </div>`;
+    }
+
     html += `<div class="card"><p class="card-title">Confirmados (${confirmed.length}/${DATA.config.limit})</p>`;
     if(!confirmed.length) html += `<div class="empty">Ninguém confirmado ainda.</div>`;
     confirmed.forEach(e=>{
@@ -2104,9 +2160,11 @@ function render(){
             : `<span class="status-pill ${e.paid ? 'pill-paid' : 'pill-wait'}">${e.paid ? '✅ pago' : '🔒 travado'}</span>`)
         : `<button class="btn btn-ghost btn-sm" onclick="toggleConfirm('${p.id}')">Cancelar</button>`;
       const nearDeadline = lockInfo.msLeft !== null && lockInfo.msLeft < (2 * 60 * 60 * 1000);
-      const unpaidWarning = !e.paid && (lockInfo.locked || nearDeadline);
+      const isMensalistaHere = DATA.config.paymentMode === 'mensal' && p.isMensalista;
+      const unpaidWarning = !e.paid && (lockInfo.locked || nearDeadline) && !isMensalistaHere;
+      const mensalistaBadge = isMensalistaHere ? ' <span class="status-pill pill-paid">📅 mensalista</span>' : '';
       html += `<div class="player-row" ${unpaidWarning ? 'style="background:rgba(201,67,46,0.06); border-radius:8px; padding-left:6px;"' : ''}>
-        <div class="player-name">${p.name}${unpaidWarning ? ' <span style="color:var(--warn); font-size:11px; font-weight:700;">💸 não pago</span>' : ''}${isAdmin && !p.rated ? ' <span class="status-pill" style="background:rgba(255,107,107,0.18); color:var(--warn);">⚠️ avaliar</span>' : ''}</div>
+        <div class="player-name">${p.name}${unpaidWarning ? ' <span style="color:var(--warn); font-size:11px; font-weight:700;">💸 não pago</span>' : ''}${mensalistaBadge}${isAdmin && !p.rated ? ' <span class="status-pill" style="background:rgba(255,107,107,0.18); color:var(--warn);">⚠️ avaliar</span>' : ''}</div>
         ${isAdmin ? renderStars(p.stars) : ''}
         ${cancelBtn}
       </div>`;
@@ -2133,8 +2191,9 @@ function render(){
     } else {
       if(!notEntered.length) html += `<div class="empty">Todos os jogadores já estão na lista.</div>`;
       notEntered.forEach(p=>{
+        const mensalistaBadge = DATA.config.paymentMode === 'mensal' && p.isMensalista ? ' <span class="status-pill pill-paid">📅 mensalista</span>' : '';
         html += `<div class="player-row">
-          <div class="player-name">${p.name}${isAdmin && !p.rated ? ' <span class="status-pill" style="background:rgba(255,107,107,0.18); color:var(--warn);">⚠️ avaliar</span>' : ''}</div>
+          <div class="player-name">${p.name}${mensalistaBadge}${isAdmin && !p.rated ? ' <span class="status-pill" style="background:rgba(255,107,107,0.18); color:var(--warn);">⚠️ avaliar</span>' : ''}</div>
           ${isAdmin ? renderStars(p.stars) : ''}
           <button class="btn btn-teal btn-sm" onclick="toggleConfirm('${p.id}')">Confirmar</button>
         </div>`;
@@ -2169,6 +2228,7 @@ function render(){
           <div class="money-row"><span>Valor total</span><b>R$ ${month.totalValue.toFixed(2)}</b></div>
           <div class="money-row"><span>Por mensalista</span><b>R$ ${month.feePerMensalista.toFixed(2)}</b></div>
           <div class="money-row"><span>Pagos</span><b>${mensPaidIds.length}/${month.mensalistaIds.length}</b></div>
+          ${isAdmin ? `<button class="btn btn-danger btn-sm btn-block" style="margin-top:8px;" onclick="deleteMonth()">🗑️ Excluir mensalidade</button>` : ''}
         </div>`;
 
         html += `<div class="card"><p class="card-title">Mensalistas pendentes (${mensPendingIds.length})</p>`;
