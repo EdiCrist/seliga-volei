@@ -1142,6 +1142,45 @@ function entryFor(session, playerId){
   return session.entries.find(e => e.playerId === playerId);
 }
 
+/**
+ * Garante que nenhum mensalista fique preso na fila de espera enquanto
+ * tem avulso confirmado — roda sozinha toda vez que a tela atualiza, não
+ * só no momento do clique em "Confirmar". Isso corrige até casos
+ * retroativos, tipo alguém que virou mensalista depois de já estar na
+ * fila. Troca o mensalista mais antigo da fila pelo avulso confirmado
+ * mais recente, repetindo até não haver mais troca possível.
+ */
+function rebalanceMensalistaPriority(session){
+  if(!session || DATA.config.paymentMode !== 'mensal') return false;
+  let changed = false;
+  let safety = 0;
+  while(safety++ < 50){
+    const waitlistedMensalistas = session.entries
+      .filter(e => e.status === 'waitlist')
+      .map(e => ({ entry: e, p: DATA.players.find(p => p.id === e.playerId) }))
+      .filter(x => x.p && x.p.isMensalista)
+      .sort((a, b) => a.entry.order - b.entry.order); // primeiro da fila primeiro
+
+    if(!waitlistedMensalistas.length) break;
+
+    const confirmedAvulsos = session.entries
+      .filter(e => e.status === 'confirmed')
+      .map(e => ({ entry: e, p: DATA.players.find(p => p.id === e.playerId) }))
+      .filter(x => x.p && !x.p.isMensalista)
+      .sort((a, b) => b.entry.order - a.entry.order); // mais recente primeiro
+
+    if(!confirmedAvulsos.length) break;
+
+    const promote = waitlistedMensalistas[0];
+    const demote = confirmedAvulsos[0];
+    promote.entry.status = 'confirmed';
+    demote.entry.status = 'waitlist';
+    demote.entry.order = Date.now() + safety; // vai pro final da fila
+    changed = true;
+  }
+  return changed;
+}
+
 async function toggleConfirm(playerId){
   const session = getCurrentSession();
   if(!session){ showToast('Crie um jogo primeiro.'); return; }
@@ -2079,8 +2118,10 @@ function renderStars(count, opts){
 function renderHeader(){
   const session = getCurrentSession();
   if(session && dataFullyLoaded){
-    const changed = reconcilePaidEntries(session);
-    if(changed) saveData();
+    const changedPayments = reconcilePaidEntries(session);
+    const changedPriority = rebalanceMensalistaPriority(session);
+    if(changedPriority) autoUpdateTeams(session);
+    if(changedPayments || changedPriority) saveData();
   }
 
   const adminBtn = document.getElementById('adminToggle');
