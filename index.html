@@ -1167,9 +1167,35 @@ async function toggleConfirm(playerId){
     }
   } else {
     const confirmedCount = session.entries.filter(e=>e.status==='confirmed').length;
-    const status = confirmedCount < DATA.config.limit ? 'confirmed' : 'waitlist';
-    session.entries.push({ playerId, status, paid:false, order: Date.now() });
-    showToast(status === 'confirmed' ? 'Presença confirmada!' : 'Adicionado à fila de espera.');
+    const isMensalMode = DATA.config.paymentMode === 'mensal';
+    const player = DATA.players.find(p=>p.id===playerId);
+    const isMensalista = isMensalMode && player && player.isMensalista;
+
+    if(confirmedCount < DATA.config.limit){
+      session.entries.push({ playerId, status: 'confirmed', paid: false, order: Date.now() });
+      showToast('Presença confirmada!');
+    } else if(isMensalista){
+      // lista cheia, mas mensalista tem prioridade — tira o avulso confirmado mais recente pra abrir vaga
+      const confirmedAvulsos = session.entries
+        .filter(e => e.status === 'confirmed')
+        .map(e => ({ entry: e, p: DATA.players.find(p => p.id === e.playerId) }))
+        .filter(x => x.p && !x.p.isMensalista)
+        .sort((a, b) => b.entry.order - a.entry.order); // mais recente primeiro
+
+      if(confirmedAvulsos.length){
+        const bumped = confirmedAvulsos[0];
+        bumped.entry.status = 'waitlist';
+        bumped.entry.order = Date.now(); // vai pro final da fila
+        session.entries.push({ playerId, status: 'confirmed', paid: false, order: Date.now() });
+        showToast(`${player.name} (mensalista) confirmado! ${bumped.p.name} foi movido pra fila pra abrir vaga.`);
+      } else {
+        session.entries.push({ playerId, status: 'waitlist', paid: false, order: Date.now() });
+        showToast('Lista cheia só com mensalistas — adicionado à fila de espera.');
+      }
+    } else {
+      session.entries.push({ playerId, status: 'waitlist', paid: false, order: Date.now() });
+      showToast('Adicionado à fila de espera.');
+    }
   }
   autoUpdateTeams(session);
   await saveData();
@@ -2173,6 +2199,9 @@ function render(){
 
     if(waitlist.length){
       html += `<div class="card"><p class="card-title">Fila de espera (${waitlist.length})</p>`;
+      if(DATA.config.paymentMode === 'mensal'){
+        html += `<p class="receipt-note" style="margin:-4px 0 10px;">Mensalistas têm prioridade — se a lista estiver cheia, um mensalista confirmando move o avulso mais recente pra cá.</p>`;
+      }
       waitlist.forEach(e=>{
         const p = DATA.players.find(p=>p.id===e.playerId);
         if(!p) return;
