@@ -527,6 +527,18 @@
   </div>
 </div>
 
+<!-- MODAL: histórico da caixinha -->
+<div class="overlay" id="modalCaixinhaLog">
+  <div class="modal">
+    <h3>Histórico da caixinha</h3>
+    <p class="sub">Toda entrada e saída, mais recente primeiro.</p>
+    <div id="caixinhaLogList"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" style="flex:1" onclick="closeModal('modalCaixinhaLog')">Fechar</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL: resumo whatsapp -->
 <div class="overlay" id="modalSummary">
   <div class="modal">
@@ -541,7 +553,7 @@
 </div>
 
 <script>
-const API_URL = "https://script.google.com/macros/s/AKfycbzYQpn1Ca_5marQ90vPlaw7l25U48yp8FspHWUpN1GoairOqgbd1STGn_i2RXT39aYh/exec";
+const API_URL = "<?!= apiUrl ?>";
 let DATA = null;
 let currentTab = 'sessao';
 let isAdmin = false;
@@ -1122,6 +1134,30 @@ async function adjustCaixinha(){
     await saveData();
     render();
     showToast('Caixinha atualizada!');
+  });
+}
+
+function openCaixinhaLog(){
+  requireAdmin('caixinhaLog', ()=>{
+    const list = document.getElementById('caixinhaLogList');
+    const log = (DATA.caixinhaLog || []).slice().sort((a,b) => b.date - a.date);
+    if(!log.length){
+      list.innerHTML = `<div class="empty">Nenhuma movimentação registrada ainda.</div>`;
+    } else {
+      list.innerHTML = log.map(entry=>{
+        const p = entry.playerId ? DATA.players.find(pl=>pl.id===entry.playerId) : null;
+        const dateStr = new Date(entry.date).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' });
+        const isPositive = entry.amount >= 0;
+        return `<div class="player-row">
+          <div style="flex:1">
+            <div class="player-name" style="font-size:13.5px;">${p ? p.name : entry.note}</div>
+            <div class="receipt-note">${p ? entry.note : ''} ${p ? '· ' : ''}${dateStr}</div>
+          </div>
+          <span class="status-pill ${isPositive ? 'pill-paid' : 'pill-owes'}">${isPositive ? '+' : ''}R$ ${entry.amount.toFixed(2)}</span>
+        </div>`;
+      }).join('');
+    }
+    openModal('modalCaixinhaLog');
   });
 }
 
@@ -2284,7 +2320,10 @@ function render(){
         <p class="card-title">🐷 Caixinha</p>
         <div class="money-row"><span>Saldo acumulado</span><b style="color:var(--ok)">R$ ${(DATA.caixinha||0).toFixed(2)}</b></div>
         <p style="font-size:12px; opacity:0.6; margin:2px 0 0;">Dinheiro de avulsos (não-mensalistas), guardado pra bola nova, ajudar o mês seguinte, etc.</p>
-        ${isAdmin ? `<button class="btn btn-ghost btn-block" style="margin-top:10px;" onclick="adjustCaixinha()">Registrar uso/entrada manual</button>` : ''}
+        <div class="row-actions" style="margin-top:10px;">
+          ${isAdmin ? `<button class="btn btn-ghost btn-sm" style="flex:1" onclick="openCaixinhaLog()">📜 Ver histórico</button>` : ''}
+          ${isAdmin ? `<button class="btn btn-ghost btn-sm" style="flex:1" onclick="adjustCaixinha()">Registrar uso/entrada</button>` : ''}
+        </div>
       </div>`;
 
       if(!month){
