@@ -674,6 +674,12 @@ async function loadData(){
     if(p.rated === undefined) p.rated = true; // jogadores já existentes são considerados avaliados
     if(p.isMensalista === undefined) p.isMensalista = false;
   });
+  DATA.caixinhaLog.forEach(entry => {
+    if(!entry.id){
+      entry.id = uid(); // entradas antigas não tinham id — preenche pra o botão de excluir funcionar
+      cleanedResidue = true;
+    }
+  });
   render();
   saveCachedData();
   dataFullyLoaded = true;
