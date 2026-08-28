@@ -553,7 +553,7 @@
 </div>
 
 <script>
-const API_URL = "<?!= apiUrl ?>";
+const API_URL = "https://script.google.com/macros/s/AKfycbzYQpn1Ca_5marQ90vPlaw7l25U48yp8FspHWUpN1GoairOqgbd1STGn_i2RXT39aYh/exec";
 let DATA = null;
 let currentTab = 'sessao';
 let isAdmin = false;
@@ -1110,6 +1110,23 @@ async function toggleMensalistaPaid(playerId){
   });
 }
 
+async function renamePlayer(playerId){
+  requireAdmin('renamePlayer', async ()=>{
+    const p = DATA.players.find(p=>p.id===playerId);
+    if(!p) return;
+    const input = prompt('Novo nome:', p.name);
+    if(input === null) return;
+    const newName = input.trim();
+    if(!newName){ showToast('Digite um nome.'); return; }
+    const exists = DATA.players.some(other => other.id !== playerId && other.name.trim().toLowerCase() === newName.toLowerCase());
+    if(exists){ showToast('Já existe um jogador com esse nome.'); return; }
+    p.name = newName;
+    await saveData();
+    render();
+    showToast('Nome atualizado!');
+  });
+}
+
 async function toggleMensalista(playerId){
   requireAdmin('toggleMensalista', async ()=>{
     const p = DATA.players.find(p=>p.id===playerId);
@@ -1130,7 +1147,7 @@ async function adjustCaixinha(){
     if(isNaN(delta) || delta === 0){ showToast('Valor inválido.'); return; }
     const note = prompt('Descreva o motivo (ex: "Comprou bola nova", "Abateu no mês seguinte"):', '') || (delta > 0 ? 'Ajuste manual' : 'Uso da caixinha');
     DATA.caixinha = roundCents((DATA.caixinha || 0) + delta);
-    DATA.caixinhaLog.push({ date: Date.now(), amount: delta, note });
+    DATA.caixinhaLog.push({ id: uid(), date: Date.now(), amount: delta, note });
     await saveData();
     render();
     showToast('Caixinha atualizada!');
@@ -1139,25 +1156,44 @@ async function adjustCaixinha(){
 
 function openCaixinhaLog(){
   requireAdmin('caixinhaLog', ()=>{
-    const list = document.getElementById('caixinhaLogList');
-    const log = (DATA.caixinhaLog || []).slice().sort((a,b) => b.date - a.date);
-    if(!log.length){
-      list.innerHTML = `<div class="empty">Nenhuma movimentação registrada ainda.</div>`;
-    } else {
-      list.innerHTML = log.map(entry=>{
-        const p = entry.playerId ? DATA.players.find(pl=>pl.id===entry.playerId) : null;
-        const dateStr = new Date(entry.date).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' });
-        const isPositive = entry.amount >= 0;
-        return `<div class="player-row">
-          <div style="flex:1">
-            <div class="player-name" style="font-size:13.5px;">${p ? p.name : entry.note}</div>
-            <div class="receipt-note">${p ? entry.note : ''} ${p ? '· ' : ''}${dateStr}</div>
-          </div>
-          <span class="status-pill ${isPositive ? 'pill-paid' : 'pill-owes'}">${isPositive ? '+' : ''}R$ ${entry.amount.toFixed(2)}</span>
-        </div>`;
-      }).join('');
-    }
+    renderCaixinhaLogList();
     openModal('modalCaixinhaLog');
+  });
+}
+
+function renderCaixinhaLogList(){
+  const list = document.getElementById('caixinhaLogList');
+  const log = (DATA.caixinhaLog || []).slice().sort((a,b) => b.date - a.date);
+  if(!log.length){
+    list.innerHTML = `<div class="empty">Nenhuma movimentação registrada ainda.</div>`;
+  } else {
+    list.innerHTML = log.map(entry=>{
+      const p = entry.playerId ? DATA.players.find(pl=>pl.id===entry.playerId) : null;
+      const dateStr = new Date(entry.date).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' });
+      const isPositive = entry.amount >= 0;
+      return `<div class="player-row">
+        <div style="flex:1">
+          <div class="player-name" style="font-size:13.5px;">${p ? p.name : entry.note}</div>
+          <div class="receipt-note">${p ? entry.note : ''} ${p ? '· ' : ''}${dateStr}</div>
+        </div>
+        <span class="status-pill ${isPositive ? 'pill-paid' : 'pill-owes'}">${isPositive ? '+' : ''}R$ ${entry.amount.toFixed(2)}</span>
+        <button class="btn btn-danger btn-sm" onclick="deleteCaixinhaLogEntry('${entry.id}')">🗑️</button>
+      </div>`;
+    }).join('');
+  }
+}
+
+async function deleteCaixinhaLogEntry(entryId){
+  requireAdmin('deleteCaixinhaLog', async ()=>{
+    const entry = (DATA.caixinhaLog || []).find(e => e.id === entryId);
+    if(!entry) return;
+    if(!confirm(`Excluir essa movimentação de R$ ${entry.amount.toFixed(2)}? O saldo da caixinha se ajusta sozinho.`)) return;
+    DATA.caixinha = roundCents((DATA.caixinha || 0) - entry.amount);
+    DATA.caixinhaLog = DATA.caixinhaLog.filter(e => e.id !== entryId);
+    await saveData();
+    renderCaixinhaLogList();
+    render();
+    showToast('Movimentação excluída, saldo ajustado.');
   });
 }
 
@@ -1353,14 +1389,14 @@ function creditCaixinhaIfAvulso(playerId, amount, entry){
   if(player && player.isMensalista) return; // mensalista já pagou a mensalidade, não conta aqui
   if(!amount) return;
   DATA.caixinha = roundCents((DATA.caixinha || 0) + amount);
-  DATA.caixinhaLog.push({ date: Date.now(), amount, playerId, note: 'Pagamento avulso' });
+  DATA.caixinhaLog.push({ id: uid(), date: Date.now(), amount, playerId, note: 'Pagamento avulso' });
   if(entry) entry.caixinhaCredited = amount;
 }
 
 function reverseCaixinhaIfAvulso(entry){
   if(!entry || !entry.caixinhaCredited) return;
   DATA.caixinha = roundCents((DATA.caixinha || 0) - entry.caixinhaCredited);
-  DATA.caixinhaLog.push({ date: Date.now(), amount: -entry.caixinhaCredited, playerId: entry.playerId, note: 'Estorno de pagamento avulso' });
+  DATA.caixinhaLog.push({ id: uid(), date: Date.now(), amount: -entry.caixinhaCredited, playerId: entry.playerId, note: 'Estorno de pagamento avulso' });
   entry.caixinhaCredited = 0;
 }
 
@@ -2619,6 +2655,7 @@ function render(){
         </div>
         ${isAdmin ? renderStars(p.stars, {editable:true, playerId:p.id}) : ''}
         ${isAdmin && isMensalMode ? `<button class="btn ${p.isMensalista?'btn-coral':'btn-ghost'} btn-sm" onclick="toggleMensalista('${p.id}')">${p.isMensalista?'✓ Mensalista':'Marcar mensalista'}</button>` : ''}
+        ${isAdmin ? `<button class="btn btn-ghost btn-sm" onclick="renamePlayer('${p.id}')">✏️</button>` : ''}
         ${isAdmin ? `<button class="btn btn-ghost btn-sm" onclick="openAdjustBalance('${p.id}')">💰</button>` : ''}
         ${isAdmin ? `<button class="btn btn-danger btn-sm" onclick="removePlayer('${p.id}')">Remover</button>` : ''}
       </div>`;
