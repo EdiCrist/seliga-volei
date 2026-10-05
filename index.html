@@ -1586,14 +1586,142 @@ function stopPixPolling(){
   if(pixPollTimer){ clearInterval(pixPollTimer); pixPollTimer = null; }
 }
 
-/** Linha com os dados do Pix (ID da transação, valor cobrado e data/hora) — só pro admin. */
+/** Monta a tabela (cabeçalho + uma linha por pagamento/pessoa) que vai pra aba "Pagamentos" da planilha. */
+function buildPaymentsExportRows(){
+  const fee = (DATA.config && DATA.config.mpFeePercent !== undefined) ? DATA.config.mpFeePercent : 2;
+  const isMensalMode = DATA.config.paymentMode === 'mensal';
+  const header = [
+    'Jogo / Mês', 'Tipo', 'Nome', 'Situação', 'Valor (R$)', 'Como pagou',
+    'Valor esperado no Mercado Pago (R$, aprox.)', 'Valor cobrado no Pix (R$)',
+    'Nº da transação no Mercado Pago', 'Pago por', 'Data/hora do pagamento', 'Comprovante anexado'
+  ];
+  const fmtTime = ms => new Date(ms).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
+  const expectedMp = r => (r.paid && r.paidVia === 'pix_auto' && r.amountPaid > 0) ? roundCents(r.amountPaid / (1 - fee/100)) : '';
+
+  // histórico da caixinha: usado pra recuperar a hora dos pagamentos avulsos antigos (melhor esforço)
+  const logPool = (DATA.caixinhaLog || [])
+    .filter(l => l.playerId && l.amount > 0)
+    .map(l => ({ date: l.date, playerId: l.playerId, amount: l.amount, used: false }));
+  const takeLogTime = (playerId, amount, refMs) => {
+    const cands = logPool.filter(l => !l.used && l.playerId === playerId && Math.abs(l.amount - amount) < 0.01);
+    if(!cands.length) return null;
+    cands.sort((a, b) => Math.abs(a.date - refMs) - Math.abs(b.date - refMs));
+    cands[0].used = true;
+    return cands[0].date;
+  };
+
+  // jogos: do mais antigo pro mais novo (pra casar a hora da caixinha direitinho), depois invertido
+  const sessionBlocks = [];
+  DATA.sessions.slice().sort((a, b) => (a.date || '').localeCompare(b.date || '')).forEach(session => {
+    const refMs = new Date((session.date || '1970-01-01') + 'T12:00:00').getTime();
+    const rows = [];
+    session.entries.filter(e => e.status === 'confirmed').forEach(e => {
+      const p = DATA.players.find(x => x.id === e.playerId);
+      if(!p) return;
+      if(!e.paid && isMensalMode && p.isMensalista) return; // mensalista paga na mensalidade, não por jogo
+      const paid = !!e.paid;
+      const isAvulso = paid ? (e.caixinhaCredited > 0) : (isMensalMode && !p.isMensalista);
+      let when = e.paidAt || null;
+      if(!when && paid && e.caixinhaCredited > 0) when = takeLogTime(e.playerId, e.caixinhaCredited, refMs);
+      rows.push([
+        formatDate(session.date), isAvulso ? 'Avulso (caixinha)' : 'Jogo', p.name,
+        paid ? 'Pago' : 'Pendente',
+        paid && e.amountPaid !== undefined ? e.amountPaid : '',
+        payMethodLabel(e), expectedMp(e), e.pixChargedAmount || '',
+        e.pixPaymentId || '', e.receiptBy || '', when ? fmtTime(when) : '',
+        e.receipt ? 'Sim' : 'Não'
+      ]);
+    });
+    rows.sort((a, b) => String(a[2]).localeCompare(String(b[2])));
+    sessionBlocks.push({ date: session.date || '', rows });
+  });
+  sessionBlocks.sort((a, b) => b.date.localeCompare(a.date));
+
+  // mensalidades
+  const monthRows = [];
+  (DATA.months || []).forEach(month => {
+    month.mensalistaIds.forEach(pid => {
+      const p = DATA.players.find(x => x.id === pid);
+      if(!p) return;
+      const r = month.payments[pid] || {};
+      const paid = !!r.paid;
+      monthRows.push([
+        month.label, 'Mensalidade', p.name,
+        paid ? 'Pago' : 'Pendente',
+        paid && r.amountPaid !== undefined ? r.amountPaid : '',
+        payMethodLabel(r), expectedMp(r), r.pixChargedAmount || '',
+        r.pixPaymentId || '', r.receiptBy || '', r.paidAt ? fmtTime(r.paidAt) : '',
+        r.receipt ? 'Sim' : 'Não'
+      ]);
+    });
+  });
+
+  const all = [header];
+  sessionBlocks.forEach(b => b.rows.forEach(r => all.push(r)));
+  monthRows.forEach(r => all.push(r));
+  return all;
+}
+
+/** Manda os pagamentos pra aba "Pagamentos" da planilha (recria a aba a cada vez). */
+async function exportPaymentsToSheet(){
+  requireAdmin('exportPayments', async ()=>{
+    const rows = buildPaymentsExportRows();
+    if(rows.length <= 1){ showToast('Ainda não há pagamentos pra exportar.'); return; }
+    try{
+      const result = await callApi(getApiUrl(), { action: 'exportPayments', rows });
+      if(result && result.ok){
+        showToast(`Aba "Pagamentos" atualizada na planilha (${result.count} linhas).`);
+      } else if(result && result.error === 'ação desconhecida'){
+        showToast('Falta atualizar também o arquivo de código (.gs) no Apps Script e publicar de novo.');
+      } else {
+        showToast((result && result.error) ? result.error : 'Não foi possível exportar.');
+      }
+    }catch(e){
+      showToast('Sem conexão pra exportar.');
+    }
+  });
+}
+
+function exportCardHtml(){
+  if(!isAdmin) return '';
+  return `<div class="card">
+    <p class="card-title">📊 Conferência com o Mercado Pago</p>
+    <p class="receipt-note" style="margin:0 0 10px;">Cria (ou atualiza) na sua planilha uma aba "Pagamentos" com uma linha por pessoa: valor, como pagou e nº da transação. Serve pra comparar com o extrato do Mercado Pago.</p>
+    <button class="btn btn-ghost btn-block" onclick="exportPaymentsToSheet()">Exportar pagamentos pra planilha</button>
+  </div>`;
+}
+
+/** Como um pagamento foi registrado (texto curto). */
+function payMethodLabel(r){
+  if(!r || !r.paid) return '';
+  if(r.paidVia === 'pix_auto') return 'Pix automático';
+  if(r.paidVia === 'saldo') return 'Saldo (sem cobrança)';
+  if(r.receipt) return 'Comprovante anexado';
+  return 'Marcado manualmente';
+}
+
+/** Linha com como foi pago + dados do Pix (nº da transação, valor cobrado, data/hora) — só pro admin. */
 function pixInfoLine(record){
-  if(!isAdmin || !record || !record.pixPaymentId) return '';
+  if(!isAdmin || !record || !record.paid) return '';
+  const isPix = record.paidVia === 'pix_auto';
   const when = record.paidAt
     ? new Date(record.paidAt).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })
     : '';
-  const charged = record.pixChargedAmount ? ` · cobrado R$ ${Number(record.pixChargedAmount).toFixed(2)}` : '';
-  return `<div class="receipt-note">Pix Mercado Pago nº ${record.pixPaymentId}${charged}${when ? ' · ' + when : ''}</div>`;
+  const parts = [payMethodLabel(record)];
+  if(record.pixPaymentId) parts.push('nº ' + record.pixPaymentId);
+  else if(isPix) parts.push('nº não gravado');
+  if(record.pixChargedAmount) parts.push('cobrado R$ ' + Number(record.pixChargedAmount).toFixed(2));
+  if(when) parts.push(when);
+  return `<div class="receipt-note"${isPix ? '' : ' style="color:var(--sun-deep);"'}>${parts.join(' · ')}</div>`;
+}
+
+/** Contagem por forma de pagamento (ex.: "Pix automático: 17 · Marcado manualmente: 1") — só pro admin. */
+function payMethodSummary(records){
+  if(!isAdmin || !records || !records.length) return '';
+  const counts = {};
+  records.forEach(r => { const l = payMethodLabel(r); if(l) counts[l] = (counts[l] || 0) + 1; });
+  const parts = Object.keys(counts).map(l => `${l}: ${counts[l]}`);
+  return `<p class="receipt-note" style="margin:-4px 0 8px;">${parts.join(' · ')}</p>`;
 }
 
 /**
@@ -2457,6 +2585,7 @@ function render(){
         html += `</div>`;
 
         html += `<div class="card"><p class="card-title">Mensalistas pagos (${mensPaidIds.length})</p>`;
+        html += payMethodSummary(mensPaidIds.map(id => month.payments[id]));
         if(!mensPaidIds.length) html += `<div class="empty">Ninguém pagou ainda.</div>`;
         mensPaidIds.forEach(playerId=>{
           const p = DATA.players.find(p=>p.id===playerId);
@@ -2486,6 +2615,7 @@ function render(){
         const avulsoPaid = avulsoEntries.filter(e=>e.paid);
 
         html += `<div class="card"><p class="card-title">Avulsos de ${formatDate(session.date)} (${avulsoEntries.length})</p>`;
+        html += payMethodSummary(avulsoPaid);
         if(!avulsoEntries.length) html += `<div class="empty">Ninguém avulso confirmado pra esse jogo.</div>`;
         avulsoPending.forEach(e=>{
           const p = DATA.players.find(p=>p.id===e.playerId);
@@ -2527,6 +2657,7 @@ function render(){
         html += `</div>`;
       }
 
+      html += exportCardHtml();
       el.innerHTML = html;
       fab.innerHTML = `<button class="btn btn-ghost" style="flex:1" onclick="openNewMonthModal()">📅 Nova mensalidade</button>
         <button class="btn btn-coral" style="flex:1" onclick="openSummary()">📋 Resumo</button>`;
@@ -2599,6 +2730,7 @@ function render(){
     html += `</div>`;
 
     html += `<div class="card"><p class="card-title">Pagos (${paid.length})</p>`;
+    html += payMethodSummary(paid);
     if(!paid.length) html += `<div class="empty">Ninguém pagou ainda.</div>`;
     paid.forEach(e=>{
       const p = DATA.players.find(p=>p.id===e.playerId);
@@ -2615,6 +2747,7 @@ function render(){
       </div>`;
     });
     html += `</div>`;
+    html += exportCardHtml();
     el.innerHTML = html;
     fab.innerHTML = `<button class="btn btn-ghost" style="flex:1" onclick="openReceiptModal(null)">📎 Novo comprovante</button>
       <button class="btn btn-coral" style="flex:1" onclick="openSummary()">📋 Resumo</button>`;
