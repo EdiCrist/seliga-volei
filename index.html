@@ -553,7 +553,7 @@
 </div>
 
 <script>
-const API_URL = "https://script.google.com/macros/s/AKfycbzYQpn1Ca_5marQ90vPlaw7l25U48yp8FspHWUpN1GoairOqgbd1STGn_i2RXT39aYh/exec";
+const API_URL = "<?!= apiUrl ?>";
 let DATA = null;
 let currentTab = 'sessao';
 let isAdmin = false;
@@ -1180,7 +1180,7 @@ function renderCaixinhaLogList(){
       return `<div class="player-row">
         <div style="flex:1">
           <div class="player-name" style="font-size:13.5px;">${p ? p.name : entry.note}</div>
-          <div class="receipt-note">${p ? entry.note : ''} ${p ? '· ' : ''}${dateStr}</div>
+          <div class="receipt-note">${p ? entry.note : ''} ${p ? '· ' : ''}${dateStr}${entry.pixPaymentId ? ' · Pix nº ' + entry.pixPaymentId : ''}</div>
         </div>
         <span class="status-pill ${isPositive ? 'pill-paid' : 'pill-owes'}">${isPositive ? '+' : ''}R$ ${entry.amount.toFixed(2)}</span>
         <button class="btn btn-danger btn-sm" onclick="deleteCaixinhaLogEntry('${entry.id}')">🗑️</button>
@@ -1395,7 +1395,7 @@ function creditCaixinhaIfAvulso(playerId, amount, entry){
   if(player && player.isMensalista) return; // mensalista já pagou a mensalidade, não conta aqui
   if(!amount) return;
   DATA.caixinha = roundCents((DATA.caixinha || 0) + amount);
-  DATA.caixinhaLog.push({ id: uid(), date: Date.now(), amount, playerId, note: 'Pagamento avulso' });
+  DATA.caixinhaLog.push({ id: uid(), date: Date.now(), amount, playerId, note: 'Pagamento avulso', pixPaymentId: (entry && entry.pixPaymentId) || null });
   if(entry) entry.caixinhaCredited = amount;
 }
 
@@ -1477,7 +1477,10 @@ async function openPixPayment(playerId){
     const result = await callApi(url, {
       action: 'createPixCharge',
       amount: chargeAmount,
-      description: `seLIGA Vôlei Amador - ${p.name} - ${dateLabel}`
+      description: `seLIGA Vôlei Amador - ${p.name} - ${dateLabel}`,
+      externalReference: `${(DATA.config.paymentMode === 'mensal' ? 'AVULSO' : 'JOGO')}_${cleanRef(p.name, 20)}_${cleanRef(session.date, 8)}`,
+      payerFirstName: splitPlayerName(p.name).first,
+      payerLastName: splitPlayerName(p.name).last
     });
     if(!result || !result.ok){
       showPixError(result && result.error ? result.error : 'Não foi possível gerar a cobrança.');
@@ -1534,7 +1537,10 @@ async function openMonthPixPayment(playerId){
     const result = await callApi(url, {
       action: 'createPixCharge',
       amount: chargeAmount,
-      description: `seLIGA Vôlei Amador - Mensalidade ${month.label} - ${p.name}`
+      description: `seLIGA Vôlei Amador - Mensalidade ${month.label} - ${p.name}`,
+      externalReference: `MENSAL_${cleanRef(p.name, 20)}_${cleanRef(month.label, 16)}`,
+      payerFirstName: splitPlayerName(p.name).first,
+      payerLastName: splitPlayerName(p.name).last
     });
     if(!result || !result.ok){
       showPixError(result && result.error ? result.error : 'Não foi possível gerar a cobrança.');
@@ -1580,6 +1586,28 @@ function stopPixPolling(){
   if(pixPollTimer){ clearInterval(pixPollTimer); pixPollTimer = null; }
 }
 
+/** Linha com os dados do Pix (ID da transação, valor cobrado e data/hora) — só pro admin. */
+function pixInfoLine(record){
+  if(!isAdmin || !record || !record.pixPaymentId) return '';
+  const when = record.paidAt
+    ? new Date(record.paidAt).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })
+    : '';
+  const charged = record.pixChargedAmount ? ` · cobrado R$ ${Number(record.pixChargedAmount).toFixed(2)}` : '';
+  return `<div class="receipt-note">Pix Mercado Pago nº ${record.pixPaymentId}${charged}${when ? ' · ' + when : ''}</div>`;
+}
+
+/**
+ * Guarda no registro do pagamento os dados da transação do Mercado Pago
+ * (ID, valor realmente cobrado no Pix e data/hora), pra você conseguir
+ * bater o extrato do Mercado Pago com o nome de quem pagou.
+ */
+function recordPixApproval(entry, fallbackPaymentId){
+  const pid = (entry.pendingPix && entry.pendingPix.paymentId) || fallbackPaymentId;
+  if(pid) entry.pixPaymentId = String(pid);
+  if(entry.pendingPix && entry.pendingPix.amount) entry.pixChargedAmount = entry.pendingPix.amount;
+  entry.paidAt = Date.now();
+}
+
 async function checkPixNow(){
   if(!pixCurrentPaymentId) return;
   const url = getApiUrl();
@@ -1594,6 +1622,7 @@ async function checkPixNow(){
         if(entry && month){
           entry.paid = true;
           entry.paidVia = 'pix_auto';
+          recordPixApproval(entry, pixCurrentPaymentId);
           entry.pendingPix = null;
           applyPaymentToBalance(month.feePerMensalista, entry, pixCurrentPlayerId);
           await saveData();
@@ -1604,6 +1633,7 @@ async function checkPixNow(){
         if(entry && session){
           entry.paid = true;
           entry.paidVia = 'pix_auto';
+          recordPixApproval(entry, pixCurrentPaymentId);
           entry.pendingPix = null;
           consumeBalance(session, entry);
           creditCaixinhaIfAvulso(pixCurrentPlayerId, entry.amountPaid, entry);
@@ -1652,6 +1682,7 @@ async function checkAllPendingPix(){
         if(result.status === 'approved'){
           entry.paid = true;
           entry.paidVia = 'pix_auto';
+          recordPixApproval(entry, );
           entry.pendingPix = null;
           consumeBalance(session, entry);
           creditCaixinhaIfAvulso(entry.playerId, entry.amountPaid, entry);
@@ -1676,6 +1707,7 @@ async function checkAllPendingPix(){
           if(result.status === 'approved'){
             entry.paid = true;
             entry.paidVia = 'pix_auto';
+            recordPixApproval(entry, );
             entry.pendingPix = null;
             applyPaymentToBalance(month.feePerMensalista, entry, playerId);
             changed = true;
@@ -1926,6 +1958,20 @@ function calcAmountDue(baseAmount, playerId){
  * Só usado no momento de gerar a cobrança — o valor "devido" mostrado
  * na tela e usado nos cálculos de saldo continua sem taxa nenhuma.
  */
+/** Deixa só letras e números (sem acento), pra usar em referências do Mercado Pago. */
+function cleanRef(text, maxLen){
+  return String(text || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .substring(0, maxLen || 20);
+}
+
+/** Separa "Fulano de Tal" em { first: 'Fulano', last: 'de Tal' } pro campo de pagador. */
+function splitPlayerName(fullName){
+  const parts = String(fullName || '').trim().split(/\s+/);
+  return { first: parts[0] || '', last: parts.slice(1).join(' ') };
+}
+
 function grossUpForMpFee(netAmount){
   const feePercent = (DATA.config && DATA.config.mpFeePercent !== undefined) ? DATA.config.mpFeePercent : 2;
   if(!feePercent || netAmount <= 0) return netAmount;
@@ -2420,6 +2466,7 @@ function render(){
             <div style="flex:1">
               <div class="player-name">${p.name}</div>
               ${record.receiptBy ? `<div class="receipt-note">pago por: ${record.receiptBy}</div>` : ''}
+              ${pixInfoLine(record)}
             </div>
             <span class="status-pill pill-paid">pago</span>
             ${record.receipt ? `<button class="btn btn-ghost btn-sm" onclick="viewReceipt('${p.id}', 'month')">📎 Ver</button>` : ''}
@@ -2470,6 +2517,7 @@ function render(){
             <div style="flex:1">
               <div class="player-name">${p.name}</div>
               ${e.receiptBy ? `<div class="receipt-note">pago por: ${e.receiptBy}</div>` : ''}
+              ${pixInfoLine(e)}
             </div>
             <span class="status-pill pill-paid">pago (caixinha)</span>
             ${e.receipt ? `<button class="btn btn-ghost btn-sm" onclick="viewReceipt('${p.id}', 'session')">📎 Ver</button>` : ''}
@@ -2559,6 +2607,7 @@ function render(){
         <div style="flex:1">
           <div class="player-name">${p.name}</div>
           ${e.receiptBy ? `<div class="receipt-note">pago por: ${e.receiptBy}</div>` : ''}
+          ${pixInfoLine(e)}
         </div>
         <span class="status-pill pill-paid">pago</span>
         ${e.receipt ? `<button class="btn btn-ghost btn-sm" onclick="viewReceipt('${p.id}')">📎 Ver</button>` : ''}
