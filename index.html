@@ -553,7 +553,7 @@
 </div>
 
 <script>
-const API_URL = "<?!= apiUrl ?>";
+const API_URL = "https://script.google.com/macros/s/AKfycbzYQpn1Ca_5marQ90vPlaw7l25U48yp8FspHWUpN1GoairOqgbd1STGn_i2RXT39aYh/exec";
 let DATA = null;
 let currentTab = 'sessao';
 let isAdmin = false;
@@ -707,11 +707,13 @@ async function saveData(){
   }
 }
 
-function showToast(msg){
+let toastTimer = null;
+function showToast(msg, ms){
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.classList.add('show');
-  setTimeout(()=>t.classList.remove('show'), 2200);
+  if(toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>t.classList.remove('show'), ms || 2200);
 }
 
 function openModal(id){ document.getElementById(id).classList.add('show'); }
@@ -1670,15 +1672,94 @@ async function exportPaymentsToSheet(){
     try{
       const result = await callApi(getApiUrl(), { action: 'exportPayments', rows });
       if(result && result.ok){
-        showToast(`Aba "Pagamentos" atualizada na planilha (${result.count} linhas).`);
+        showToast(`Aba "Pagamentos" atualizada na planilha (${result.count} linhas).`, 4000);
       } else if(result && result.error === 'ação desconhecida'){
-        showToast('Falta atualizar também o arquivo de código (.gs) no Apps Script e publicar de novo.');
+        showToast('O Google ainda está com a versão antiga do código (.gs). Publique de novo, ou use "Baixar arquivo" / "Copiar".', 7000);
       } else {
-        showToast((result && result.error) ? result.error : 'Não foi possível exportar.');
+        showToast('O Google recusou: ' + ((result && result.error) ? result.error : 'erro desconhecido') + '. Use "Baixar arquivo" / "Copiar".', 7000);
       }
     }catch(e){
-      showToast('Sem conexão pra exportar.');
+      console.error('exportPayments falhou:', e);
+      if(e && e.name === 'SyntaxError'){
+        showToast('O Google devolveu uma página de erro em vez da resposta normal (veja "Execuções" no Apps Script). Use "Baixar arquivo" / "Copiar".', 8000);
+      } else {
+        showToast('Não consegui falar com o Google. Tente de novo, ou use "Baixar arquivo" / "Copiar".', 7000);
+      }
     }
+  });
+}
+
+/** Transforma a tabela em CSV (separador ";" e vírgula decimal, que é o que o Excel/Planilhas em português esperam). */
+function paymentsRowsToCsv(rows){
+  const cell = v => {
+    if(v === null || v === undefined || v === '') return '';
+    if(typeof v === 'number') return String(v).replace('.', ',');
+    let t = String(v);
+    if(/^[=+\-@]/.test(t)) t = "'" + t; // nome que parece fórmula vira texto comum
+    if(/[;"\n\r]/.test(t)) t = '"' + t.replace(/"/g, '""') + '"';
+    return t;
+  };
+  return rows.map(r => r.map(cell).join(';')).join('\r\n');
+}
+
+/** Transforma a tabela em texto separado por TAB (cola direto nas colunas do Google Planilhas). */
+function paymentsRowsToTsv(rows){
+  const cell = v => {
+    if(v === null || v === undefined || v === '') return '';
+    if(typeof v === 'number') return String(v).replace('.', ',');
+    let t = String(v).replace(/[\t\r\n]+/g, ' ');
+    if(/^[=+\-@]/.test(t)) t = "'" + t; // evita que a planilha trate o nome como fórmula
+    return t;
+  };
+  return rows.map(r => r.map(cell).join('\t')).join('\n');
+}
+
+/** Baixa os pagamentos como arquivo (abre no Excel ou no Google Planilhas). Não usa o Google Apps Script. */
+function downloadPaymentsCsv(){
+  requireAdmin('exportPayments', ()=>{
+    const rows = buildPaymentsExportRows();
+    if(rows.length <= 1){ showToast('Ainda não há pagamentos pra exportar.'); return; }
+    const csv = '\uFEFF' + paymentsRowsToCsv(rows); // BOM pro Excel entender os acentos
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'pagamentos-seliga.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 5000);
+    showToast('Arquivo gerado. Veja nos downloads do aparelho (se não baixar, use "Copiar").', 6000);
+  });
+}
+
+/** Copia os pagamentos pra área de transferência: é só abrir uma planilha nova e colar. Não usa o Google Apps Script. */
+function copyPaymentsToClipboard(){
+  requireAdmin('exportPayments', async ()=>{
+    const rows = buildPaymentsExportRows();
+    if(rows.length <= 1){ showToast('Ainda não há pagamentos pra exportar.'); return; }
+    const text = paymentsRowsToTsv(rows);
+    let ok = false;
+    try{
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      }
+    }catch(e){ ok = false; }
+    if(!ok){
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      try{ ok = document.execCommand('copy'); }catch(e){ ok = false; }
+      ta.remove();
+    }
+    showToast(ok
+      ? 'Copiado! Abra uma planilha nova e cole (Ctrl+V).'
+      : 'Não consegui copiar neste aparelho. Tente "Baixar arquivo".', 6000);
   });
 }
 
@@ -1686,8 +1767,12 @@ function exportCardHtml(){
   if(!isAdmin) return '';
   return `<div class="card">
     <p class="card-title">📊 Conferência com o Mercado Pago</p>
-    <p class="receipt-note" style="margin:0 0 10px;">Cria (ou atualiza) na sua planilha uma aba "Pagamentos" com uma linha por pessoa: valor, como pagou e nº da transação. Serve pra comparar com o extrato do Mercado Pago.</p>
-    <button class="btn btn-ghost btn-block" onclick="exportPaymentsToSheet()">Exportar pagamentos pra planilha</button>
+    <p class="receipt-note" style="margin:0 0 10px;">Uma linha por pessoa: valor, como pagou e nº da transação. Serve pra comparar com o extrato do Mercado Pago.</p>
+    <div class="row-actions">
+      <button class="btn btn-ghost btn-sm" style="flex:1" onclick="copyPaymentsToClipboard()">📋 Copiar pra colar</button>
+      <button class="btn btn-ghost btn-sm" style="flex:1" onclick="downloadPaymentsCsv()">⬇️ Baixar arquivo</button>
+    </div>
+    <button class="btn btn-ghost btn-sm btn-block" style="margin-top:8px;" onclick="exportPaymentsToSheet()">Enviar pra aba "Pagamentos" da planilha</button>
   </div>`;
 }
 
