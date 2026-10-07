@@ -527,6 +527,18 @@
   </div>
 </div>
 
+<!-- MODAL: conferência com o Mercado Pago -->
+<div class="overlay" id="modalMpCheck">
+  <div class="modal">
+    <h3>Conferência com o Mercado Pago</h3>
+    <p class="sub">Compara quem está marcado como pago no app com os Pix realmente aprovados no Mercado Pago.</p>
+    <div id="mpCheckBody"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" style="flex:1" onclick="closeModal('modalMpCheck')">Fechar</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL: histórico da caixinha -->
 <div class="overlay" id="modalCaixinhaLog">
   <div class="modal">
@@ -1763,11 +1775,181 @@ function copyPaymentsToClipboard(){
   });
 }
 
+/** Escapa texto pra colocar com segurança dentro de HTML. */
+function escapeHtml(t){
+  return String(t === undefined || t === null ? '' : t)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/** Normaliza texto pra comparar descrições (sem acento, minúsculo, espaços simples). */
+function normText(t){
+  return String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Cruza o que o app diz (quem está marcado como pago) com o que o Mercado Pago
+ * diz (cobranças aprovadas). Cada cobrança do app leva o nome da pessoa na
+ * descrição, então dá pra achar a cobrança de cada um.
+ * Retorna { sections: [{ title, rows }], orphans: [...] }.
+ */
+function buildMpReconciliation(payments){
+  const byDesc = {};
+  payments.forEach(p => {
+    const k = normText(p.description);
+    (byDesc[k] = byDesc[k] || []).push(p);
+  });
+  const used = new Set();
+  const order = { app_paid_no_mp:0, app_paid_mp_unpaid:1, mp_paid_app_pending:2, duplicated:3, pending_mp_unpaid:4, pending:5, ok:6 };
+
+  function analyze(name, expectedDesc, appPaid, methodLabel){
+    const attempts = (byDesc[normText(expectedDesc)] || []).slice()
+      .sort((a, b) => String(b.created).localeCompare(String(a.created)));
+    attempts.forEach(p => used.add(p.id));
+    const approved = attempts.filter(p => p.status === 'approved');
+    let kind;
+    if(approved.length > 1) kind = 'duplicated';
+    else if(approved.length === 1) kind = appPaid ? 'ok' : 'mp_paid_app_pending';
+    else if(appPaid) kind = attempts.length ? 'app_paid_mp_unpaid' : 'app_paid_no_mp';
+    else kind = attempts.length ? 'pending_mp_unpaid' : 'pending';
+    return { name, kind, appPaid, methodLabel, attempts, approved };
+  }
+
+  const sections = [];
+
+  const month = getCurrentMonth();
+  if(month){
+    const rows = [];
+    month.mensalistaIds.forEach(pid => {
+      const p = DATA.players.find(x => x.id === pid);
+      if(!p) return;
+      const r = month.payments[pid] || {};
+      rows.push(analyze(p.name, `seLIGA Vôlei Amador - Mensalidade ${month.label} - ${p.name}`, !!r.paid, payMethodLabel(r)));
+    });
+    sections.push({ title: `Mensalidade ${month.label}`, rows });
+  }
+
+  const session = getCurrentSession();
+  if(session){
+    const rows = [];
+    session.entries.filter(e => e.status === 'confirmed').forEach(e => {
+      const p = DATA.players.find(x => x.id === e.playerId);
+      if(!p) return;
+      if(!e.paid && DATA.config.paymentMode === 'mensal' && p.isMensalista) return; // mensalista paga na mensalidade
+      rows.push(analyze(p.name, `seLIGA Vôlei Amador - ${p.name} - ${formatDate(session.date)}`, !!e.paid, payMethodLabel(e)));
+    });
+    if(rows.length) sections.push({ title: `Jogo de ${formatDate(session.date)}`, rows });
+  }
+
+  sections.forEach(sec => sec.rows.sort((a, b) => (order[a.kind] - order[b.kind]) || a.name.localeCompare(b.name)));
+
+  // pagamentos aprovados do mesmo mês/jogo que não casaram com ninguém (nome diferente, por exemplo)
+  const keys = [];
+  if(month) keys.push(normText(`Mensalidade ${month.label}`));
+  if(session) keys.push(normText(` - ${formatDate(session.date)}`));
+  const orphans = payments.filter(p =>
+    p.status === 'approved' && !used.has(p.id) &&
+    keys.some(k => normText(p.description).includes(k)));
+
+  return { sections, orphans };
+}
+
+function mpStatusLabel(status){
+  const map = { approved:'aprovado', pending:'aguardando pagamento', in_process:'em análise',
+    cancelled:'cancelado ou expirado', rejected:'recusado', refunded:'devolvido', charged_back:'contestado' };
+  return map[status] || status || 'desconhecido';
+}
+
+function fmtMoneyBr(n){ return 'R$ ' + Number(n).toFixed(2).replace('.', ','); }
+
+function fmtMpDate(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  if(isNaN(d.getTime())) return '';
+  return d.toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+}
+
+/** Monta o HTML do resultado da conferência. */
+function renderMpCheck(result){
+  const kindText = {
+    app_paid_no_mp:     r => `Marcado como pago no app (${r.methodLabel}), mas <b>não existe nenhuma cobrança dele no Mercado Pago</b>. Confira no seu banco.`,
+    app_paid_mp_unpaid: r => `Marcado como pago no app (${r.methodLabel}), mas o Pix gerado <b>não foi pago</b> (${mpStatusLabel(r.attempts[0].status)}, criado em ${fmtMpDate(r.attempts[0].created)}). Confira no seu banco.`,
+    mp_paid_app_pending:r => `O Mercado Pago <b>recebeu</b> (${fmtMoneyBr(r.approved[0].amount)} em ${fmtMpDate(r.approved[0].approved || r.approved[0].created)}), mas no app ainda está <b>pendente</b>.`,
+    duplicated:         r => `<b>${r.approved.length} Pix aprovados</b> pra essa mesma cobrança (${r.approved.map(p => fmtMpDate(p.approved || p.created)).join(' e ')}). Pode ter pago em duplicidade.`,
+    pending_mp_unpaid:  r => `Pendente. Pix gerado em ${fmtMpDate(r.attempts[0].created)} e ainda não pago (${mpStatusLabel(r.attempts[0].status)}).`,
+    pending:            () => `Pendente. Nenhum Pix gerado.`,
+    ok:                 r => `Confere. Pix aprovado em ${fmtMpDate(r.approved[0].approved || r.approved[0].created)} · ${fmtMoneyBr(r.approved[0].amount)}${r.approved[0].net ? ' (líquido ' + fmtMoneyBr(r.approved[0].net) + ')' : ''}.`
+  };
+  const icon = { app_paid_no_mp:'🔎', app_paid_mp_unpaid:'🔎', mp_paid_app_pending:'⚠️', duplicated:'⚠️', pending_mp_unpaid:'⏳', pending:'⏳', ok:'✅' };
+  const attention = new Set(['app_paid_no_mp', 'app_paid_mp_unpaid', 'mp_paid_app_pending', 'duplicated']);
+
+  let html = '';
+  result.sections.forEach(sec => {
+    const counts = {};
+    sec.rows.forEach(r => counts[r.kind] = (counts[r.kind] || 0) + 1);
+    const appPaid = sec.rows.filter(r => r.appPaid).length;
+    const mpOk = sec.rows.filter(r => r.approved.length).length;
+    const toCheck = sec.rows.filter(r => attention.has(r.kind)).length;
+    html += `<div class="card" style="margin-bottom:10px;">
+      <p class="card-title">${escapeHtml(sec.title)}</p>
+      <p class="receipt-note" style="margin:-4px 0 10px;">Marcados como pagos no app: <b>${appPaid}</b> · Com Pix aprovado no Mercado Pago: <b>${mpOk}</b> · Pra conferir: <b>${toCheck}</b></p>`;
+    sec.rows.forEach(r => {
+      html += `<div class="player-row" style="align-items:flex-start;">
+        <div style="flex:1">
+          <div class="player-name" style="font-size:13.5px;">${icon[r.kind]} ${escapeHtml(r.name)}</div>
+          <div class="receipt-note"${attention.has(r.kind) ? ' style="color:var(--sun-deep);"' : ''}>${kindText[r.kind](r)}</div>
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+  });
+
+  if(result.orphans.length){
+    html += `<div class="card" style="margin-bottom:10px;">
+      <p class="card-title">Aprovados no Mercado Pago sem dono</p>
+      <p class="receipt-note" style="margin:-4px 0 10px;">Do mesmo mês ou jogo, mas com nome que não bate com ninguém da lista.</p>`;
+    result.orphans.forEach(p => {
+      html += `<div class="player-row"><div style="flex:1">
+        <div class="player-name" style="font-size:13px;">${escapeHtml(p.description)}</div>
+        <div class="receipt-note">${fmtMoneyBr(p.amount)} · ${fmtMpDate(p.approved || p.created)}</div></div></div>`;
+    });
+    html += `</div>`;
+  }
+
+  if(!result.sections.length) html = `<div class="empty">Nenhuma mensalidade ou jogo selecionado pra conferir.</div>`;
+  return html;
+}
+
+/** Consulta o Mercado Pago e mostra a conferência. */
+async function openMpCheck(){
+  requireAdmin('mpCheck', async ()=>{
+    const body = document.getElementById('mpCheckBody');
+    body.innerHTML = `<div class="empty">Consultando o Mercado Pago...</div>`;
+    openModal('modalMpCheck');
+    try{
+      const result = await callApi(getApiUrl(), { action: 'listMpPayments', daysBack: 75 });
+      if(result && result.ok){
+        body.innerHTML = renderMpCheck(buildMpReconciliation(result.payments || []));
+      } else if(result && result.error === 'ação desconhecida'){
+        body.innerHTML = `<div class="empty">O Google ainda está com a versão antiga do código (.gs). Cole o arquivo novo no Apps Script e publique uma nova versão.</div>`;
+      } else {
+        body.innerHTML = `<div class="empty">O Mercado Pago não respondeu: ${escapeHtml((result && result.error) || 'erro desconhecido')}</div>`;
+      }
+    }catch(e){
+      console.error('conferência falhou:', e);
+      body.innerHTML = `<div class="empty">Não consegui falar com o Google. Tente de novo em instantes.</div>`;
+    }
+  });
+}
+
 function exportCardHtml(){
   if(!isAdmin) return '';
   return `<div class="card">
     <p class="card-title">📊 Conferência com o Mercado Pago</p>
-    <p class="receipt-note" style="margin:0 0 10px;">Uma linha por pessoa: valor, como pagou e nº da transação. Serve pra comparar com o extrato do Mercado Pago.</p>
+    <p class="receipt-note" style="margin:0 0 10px;">O botão abaixo compara quem está marcado como pago no app com os Pix aprovados no Mercado Pago e mostra quem não bate.</p>
+    <button class="btn btn-coral btn-block" style="margin-bottom:10px;" onclick="openMpCheck()">🔎 Conferir com o Mercado Pago agora</button>
+    <p class="receipt-note" style="margin:0 0 6px;">Ou leve a lista pra uma planilha (uma linha por pessoa):</p>
     <div class="row-actions">
       <button class="btn btn-ghost btn-sm" style="flex:1" onclick="copyPaymentsToClipboard()">📋 Copiar pra colar</button>
       <button class="btn btn-ghost btn-sm" style="flex:1" onclick="downloadPaymentsCsv()">⬇️ Baixar arquivo</button>
