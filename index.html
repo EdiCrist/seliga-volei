@@ -551,10 +551,23 @@
   </div>
 </div>
 
+<!-- MODAL: votação de times -->
+<div class="overlay" id="modalVote">
+  <div class="modal">
+    <h3>Votação de times</h3>
+    <p class="sub">Três opções equilibradas. Copie o texto, cole no WhatsApp e faça a enquete. Quando a votação acabar, toque em "Usar esta" na opção vencedora.</p>
+    <div id="voteBody"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" style="flex:1" onclick="closeModal('modalVote')">Fechar</button>
+      <button class="btn btn-ghost" style="flex:1" onclick="generateVoteOptions()">🔀 Sortear de novo</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL: resumo whatsapp -->
 <div class="overlay" id="modalSummary">
   <div class="modal">
-    <h3>Resumo para o grupo</h3>
+    <h3>Times do jogo</h3>
     <p class="sub">Copie e cole direto no WhatsApp.</p>
     <div class="summary-box" id="summaryText"></div>
     <div class="modal-actions">
@@ -1370,6 +1383,15 @@ function buildTeamsFromPlayers(players, opts){
 function autoUpdateTeams(session){
   if(!session) return;
   const confirmedIds = session.entries.filter(e=>e.status==='confirmed').map(e=>e.playerId);
+
+  // Times escolhidos na votação ficam valendo enquanto o grupo de confirmados for o mesmo.
+  // Se alguém entrar ou sair, a divisão deixa de valer e é refeita.
+  if(session.votedTeamsKey){
+    const key = confirmedIds.slice().sort().join(',');
+    if(key === session.votedTeamsKey && session.teams && session.teams.length) return;
+    session.votedTeamsKey = null;
+  }
+
   const players = confirmedIds.map(id => DATA.players.find(p=>p.id===id)).filter(Boolean);
   const mode = session.teamMode || 'balanced';
   session.teams = players.length >= 2 ? buildTeamsFromPlayers(players, {shuffle:false, mode}) : [];
@@ -1383,10 +1405,184 @@ async function generateTeams(){
     const players = confirmedIds.map(id => DATA.players.find(p=>p.id===id)).filter(Boolean);
     if(players.length < 2){ showToast('Confirme mais jogadores primeiro.'); return; }
     const mode = session.teamMode || 'balanced';
+    session.votedTeamsKey = null; // embaralhar de novo descarta a escolha da votação
     session.teams = buildTeamsFromPlayers(players, {shuffle:true, mode});
     await saveData();
     render();
     showToast('Times embaralhados de novo!');
+  });
+}
+
+/* ---------- VOTAÇÃO DE TIMES (3 opções) ---------- */
+let voteOptions = [];
+
+/** Chave que identifica uma divisão em times, ignorando a ordem dos times e a ordem dentro de cada um. */
+function teamsSignature(teams){
+  return teams.map(t => t.slice().sort().join(',')).sort().join('|');
+}
+
+/** Quantos pares de jogadores caem juntos no mesmo time em duas divisões (quanto menos, mais diferentes elas são). */
+function sharedPairs(teamsA, teamsB){
+  const together = new Set();
+  teamsA.forEach(t => { for(let i = 0; i < t.length; i++) for(let j = i + 1; j < t.length; j++) together.add([t[i], t[j]].sort().join('+')); });
+  let shared = 0;
+  teamsB.forEach(t => { for(let i = 0; i < t.length; i++) for(let j = i + 1; j < t.length; j++) if(together.has([t[i], t[j]].sort().join('+'))) shared++; });
+  return shared;
+}
+
+/** Diferença entre a média de estrelas do time mais forte e do mais fraco (menor = mais equilibrado). */
+function teamsSpread(teams, players){
+  const byId = {}; players.forEach(p => byId[p.id] = p);
+  const avgs = teams.filter(t => t.length).map(t => t.reduce((s, id) => s + (byId[id] ? byId[id].stars : 0), 0) / t.length);
+  return avgs.length ? Math.max(...avgs) - Math.min(...avgs) : 0;
+}
+
+/**
+ * Sorteia 3 divisões em times que sejam diferentes entre si, mas todas equilibradas.
+ * Tenta muitos sorteios, descarta os desequilibrados (acima de 0,5 estrela de diferença
+ * entre o time mais forte e o mais fraco, ou o melhor que existir) e escolhe 3 que
+ * tenham o mínimo de jogadores iguais nos mesmos times.
+ */
+function buildVoteOptions(players, mode, tries){
+  tries = tries || 400;
+  const pool = [];
+  const seen = new Set();
+  for(let i = 0; i < tries; i++){
+    const teams = buildTeamsFromPlayers(players, { shuffle:true, mode });
+    const sig = teamsSignature(teams);
+    if(seen.has(sig)) continue;
+    seen.add(sig);
+    pool.push({ teams, spread: teamsSpread(teams, players) });
+  }
+  if(!pool.length) return [];
+  const best = Math.min(...pool.map(o => o.spread));
+  const limit = Math.max(best + 0.0001, 0.5);
+  let good = pool.filter(o => o.spread <= limit);
+  if(good.length < 3) good = pool.slice().sort((a, b) => a.spread - b.spread).slice(0, Math.max(3, good.length));
+
+  // escolhe a 1ª ao acaso e as próximas as mais diferentes das já escolhidas
+  const chosen = [good[Math.floor(Math.random() * good.length)]];
+  while(chosen.length < 3 && chosen.length < good.length){
+    let bestCand = null, bestScore = Infinity;
+    good.forEach(c => {
+      if(chosen.includes(c)) return;
+      const score = chosen.reduce((s, o) => s + sharedPairs(o.teams, c.teams), 0);
+      if(score < bestScore){ bestScore = score; bestCand = c; }
+    });
+    if(!bestCand) break;
+    chosen.push(bestCand);
+  }
+  return chosen.map(o => o.teams);
+}
+
+/** Texto de uma opção, pronto pra colar no WhatsApp (só nomes, sem estrelas). */
+function buildVoteOptionText(teams, label, mode, confirmedCount){
+  const nameOf = id => { const p = DATA.players.find(p => p.id === id); return p ? p.name : null; };
+  const isFixed6 = mode === 'fixed6' && confirmedCount >= 15 && confirmedCount <= 17;
+  const colors = ['🔵', '🟠', '🟢', '🟣'];
+  const lines = ['🏐 *OPÇÃO ' + label + '*'];
+  teams.forEach((team, idx) => {
+    const names = team.map(nameOf).filter(Boolean);
+    if(!names.length) return;
+    lines.push('');
+    lines.push(isFixed6 && idx === 2
+      ? '⏳ *AGUARDANDO COMPLETAR* (' + names.length + ')'
+      : colors[idx % colors.length] + ' *TIME ' + (idx + 1) + '* (' + names.length + ')');
+    names.forEach(n => lines.push('▪️ ' + n));
+  });
+  return lines.join('\n');
+}
+
+function renderVoteOptions(){
+  const session = getCurrentSession();
+  const mode = session ? (session.teamMode || 'balanced') : 'balanced';
+  const confirmedCount = session ? session.entries.filter(e => e.status === 'confirmed').length : 0;
+  const labels = ['A', 'B', 'C'];
+  let html = '';
+  voteOptions.forEach((teams, i) => {
+    const text = buildVoteOptionText(teams, labels[i], mode, confirmedCount);
+    html += `<div class="card" style="margin-bottom:10px;">
+      <p class="card-title">Opção ${labels[i]}</p>
+      <div class="summary-box" style="margin-bottom:8px;">${escapeHtml(text)}</div>
+      <div class="row-actions">
+        <button class="btn btn-ghost btn-sm" style="flex:1" onclick="copyVoteOption(${i})">📋 Copiar</button>
+        <button class="btn btn-coral btn-sm" style="flex:1" onclick="useVoteOption(${i})">✔ Usar esta</button>
+      </div>
+    </div>`;
+  });
+  html += `<button class="btn btn-ghost btn-sm btn-block" onclick="copyAllVoteOptions()">📋 Copiar as 3 opções juntas</button>`;
+  document.getElementById('voteBody').innerHTML = html;
+}
+
+function generateVoteOptions(){
+  const session = getCurrentSession();
+  if(!session) return;
+  const players = session.entries.filter(e => e.status === 'confirmed')
+    .map(e => DATA.players.find(p => p.id === e.playerId)).filter(Boolean);
+  if(players.length < 4){
+    document.getElementById('voteBody').innerHTML = `<div class="empty">Confirme pelo menos 4 jogadores pra gerar opções de votação.</div>`;
+    voteOptions = [];
+    return;
+  }
+  voteOptions = buildVoteOptions(players, session.teamMode || 'balanced');
+  if(voteOptions.length < 3){
+    showToast('Com poucos jogadores só existem ' + voteOptions.length + ' divisões diferentes.', 4000);
+  }
+  renderVoteOptions();
+}
+
+function openVotePanel(){
+  requireAdmin('vote', ()=>{
+    const session = getCurrentSession();
+    if(!session){ showToast('Crie um jogo primeiro.'); return; }
+    openModal('modalVote');
+    generateVoteOptions();
+  });
+}
+
+async function copyTextToClipboard(text){
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){ await navigator.clipboard.writeText(text); return true; }
+  }catch(e){}
+  try{
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    const ok = document.execCommand('copy'); ta.remove(); return ok;
+  }catch(e){ return false; }
+}
+
+async function copyVoteOption(i){
+  const session = getCurrentSession();
+  if(!session || !voteOptions[i]) return;
+  const mode = session.teamMode || 'balanced';
+  const count = session.entries.filter(e => e.status === 'confirmed').length;
+  const ok = await copyTextToClipboard(buildVoteOptionText(voteOptions[i], ['A','B','C'][i], mode, count));
+  showToast(ok ? 'Opção copiada! Cole no WhatsApp.' : 'Não consegui copiar neste aparelho.', 3500);
+}
+
+async function copyAllVoteOptions(){
+  const session = getCurrentSession();
+  if(!session || !voteOptions.length) return;
+  const mode = session.teamMode || 'balanced';
+  const count = session.entries.filter(e => e.status === 'confirmed').length;
+  const header = '🗳️ *VOTAÇÃO DOS TIMES — ' + formatDate(session.date) + '*\nEscolha a opção que achar mais justa:\n';
+  const body = voteOptions.map((t, i) => buildVoteOptionText(t, ['A','B','C'][i], mode, count)).join('\n\n— — — — —\n\n');
+  const ok = await copyTextToClipboard(header + '\n' + body);
+  showToast(ok ? 'As 3 opções foram copiadas! Cole no WhatsApp.' : 'Não consegui copiar neste aparelho.', 3500);
+}
+
+async function useVoteOption(i){
+  requireAdmin('vote', async ()=>{
+    const session = getCurrentSession();
+    if(!session || !voteOptions[i]) return;
+    if(!confirm('Usar a opção ' + ['A','B','C'][i] + ' como os times oficiais do jogo?')) return;
+    session.teams = voteOptions[i];
+    session.votedTeamsKey = session.entries.filter(e => e.status === 'confirmed').map(e => e.playerId).sort().join(',');
+    await saveData();
+    closeModal('modalVote');
+    render();
+    showToast('Opção ' + ['A','B','C'][i] + ' definida como os times do jogo! ✔', 4000);
   });
 }
 
@@ -1395,6 +1591,7 @@ async function setTeamMode(mode){
     const session = getCurrentSession();
     if(!session) return;
     session.teamMode = mode;
+    session.votedTeamsKey = null; // mudar o modo de divisão descarta a escolha da votação
     autoUpdateTeams(session);
     await saveData();
     render();
@@ -2649,46 +2846,67 @@ function formatCountdown(ms){
 }
 
 /* ---------- SUMMARY ---------- */
+/** Monta o texto do resumo do jogo pro WhatsApp: só o jogo, os times e a fila de espera. */
+function buildSummaryText(session){
+  const confirmed = session.entries.filter(e => e.status === 'confirmed');
+  const waitlist = session.entries.filter(e => e.status === 'waitlist');
+  const nameOf = id => { const p = DATA.players.find(p => p.id === id); return p ? p.name : null; };
+
+  // dia da semana por extenso (ex.: "sexta-feira")
+  let weekday = '';
+  if(session.date){
+    const [y, m, d] = session.date.split('-').map(Number);
+    weekday = new Date(y, m - 1, d).toLocaleDateString('pt-BR', { weekday:'long' });
+  }
+  const timeRange = (session.timeStart && session.timeEnd) ? `${session.timeStart} às ${session.timeEnd}` : (session.timeStart || '');
+
+  const lines = [];
+  lines.push('🏐 *VÔLEI — ' + (weekday ? weekday.toUpperCase() + ', ' : '') + formatDate(session.date) + '*');
+  if(timeRange) lines.push('🕐 ' + timeRange);
+  lines.push('👥 ' + confirmed.length + ' confirmados');
+
+  if(session.teams && session.teams.length){
+    const mode = session.teamMode || 'balanced';
+    const isFixed6 = mode === 'fixed6' && confirmed.length >= 15 && confirmed.length <= 17;
+    const colors = ['🔵', '🟠', '🟢', '🟣'];
+    session.teams.forEach((team, idx) => {
+      const names = team.map(nameOf).filter(Boolean);
+      if(!names.length) return;
+      const isWaiting = isFixed6 && idx === 2;
+      lines.push('');
+      lines.push(isWaiting
+        ? '⏳ *AGUARDANDO COMPLETAR* (' + names.length + ')'
+        : (colors[idx % colors.length] + ' *TIME ' + (idx + 1) + '* (' + names.length + ')'));
+      names.forEach(n => lines.push('▪️ ' + n));
+    });
+  } else {
+    // times ainda não sorteados: mostra só a lista de confirmados
+    lines.push('');
+    lines.push('✅ *CONFIRMADOS*');
+    confirmed.forEach((e, i) => {
+      const n = nameOf(e.playerId);
+      if(n) lines.push((i + 1) + '. ' + n);
+    });
+  }
+
+  if(waitlist.length){
+    lines.push('');
+    lines.push('🪑 *FILA DE ESPERA*');
+    waitlist.forEach((e, i) => {
+      const n = nameOf(e.playerId);
+      if(n) lines.push((i + 1) + '. ' + n);
+    });
+  }
+
+  lines.push('');
+  lines.push('Bom jogo, galera! 💪');
+  return lines.join('\n');
+}
+
 function openSummary(){
   const session = getCurrentSession();
   if(!session){ showToast('Crie um jogo primeiro.'); return; }
-  const confirmed = session.entries.filter(e=>e.status==='confirmed');
-  const waitlist = session.entries.filter(e=>e.status==='waitlist');
-  const per = valuePerPlayer(session);
-  let lines = [];
-  const timeRange = (session.timeStart && session.timeEnd) ? `${session.timeStart} às ${session.timeEnd}` : '';
-  lines.push(`🏐 *seLIGA Vôlei Amador — ${formatDate(session.date)}${timeRange ? ' · ' + timeRange : ''}*`);
-  lines.push(`Confirmados: ${confirmed.length}/${DATA.config.limit}`);
-  lines.push('');
-  confirmed.forEach((e,i)=>{
-    const p = DATA.players.find(p=>p.id===e.playerId);
-    if(!p) return;
-    lines.push(`${i+1}. ${p.name} ${e.paid ? '✅ pago' : '❌ pendente'}`);
-  });
-  if(waitlist.length){
-    lines.push('');
-    lines.push('⏳ Fila de espera:');
-    waitlist.forEach((e,i)=>{
-      const p = DATA.players.find(p=>p.id===e.playerId);
-      if(p) lines.push(`${i+1}. ${p.name}`);
-    });
-  }
-  lines.push('');
-  lines.push(`💰 Valor por pessoa: R$ ${per.toFixed(2)}`);
-  if(DATA.config.pixKey) lines.push(`Pix: ${DATA.config.pixKey}`);
-  if(session.teams && session.teams.length){
-    lines.push('');
-    lines.push('⚖️ Times:');
-    const mode = session.teamMode || 'balanced';
-    const confirmedCountForTeams = confirmed.length;
-    const isFixed6 = mode === 'fixed6' && confirmedCountForTeams >= 15 && confirmedCountForTeams <= 17;
-    session.teams.forEach((team, idx)=>{
-      const names = team.map(id => DATA.players.find(p=>p.id===id)?.name).filter(Boolean).join(', ');
-      const label = (isFixed6 && idx === 2) ? 'Aguardando completar' : `Time ${idx+1}`;
-      lines.push(`${label}: ${names}`);
-    });
-  }
-  document.getElementById('summaryText').textContent = lines.join('\n');
+  document.getElementById('summaryText').textContent = buildSummaryText(session);
   openModal('modalSummary');
 }
 
@@ -3147,6 +3365,7 @@ function render(){
       } else {
         noteTxt = '15+ confirmados → 3 times equilibrados · formação automática';
       }
+      if(session.votedTeamsKey) noteTxt = '🗳️ Times escolhidos na votação · valem enquanto os confirmados forem os mesmos';
       html += `<p style="font-size:11.5px; opacity:0.5; margin:-2px 0 10px;">${noteTxt}</p>`;
 
       html += `<div class="team-grid">`;
@@ -3162,7 +3381,8 @@ function render(){
       html += `</div>`;
     }
     el.innerHTML = html;
-    fab.innerHTML = `<button class="btn btn-coral btn-block" onclick="generateTeams()">🔀 Embaralhar de novo</button>`;
+    fab.innerHTML = `<button class="btn btn-ghost" style="flex:1" onclick="openVotePanel()">🗳️ Votação de times</button>
+      <button class="btn btn-coral" style="flex:1" onclick="generateTeams()">🔀 Embaralhar</button>`;
   }
 
   else if(currentTab === 'jogadores'){
