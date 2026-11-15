@@ -1475,35 +1475,33 @@ function buildVoteOptions(players, mode, tries){
   return chosen.map(o => o.teams);
 }
 
-/** Texto de uma opção, pronto pra colar no WhatsApp (só nomes, sem estrelas). */
+/** Texto de uma opção: tabela compacta (um time por coluna), só nomes, em fonte monoespaçada no WhatsApp. */
 function buildVoteOptionText(teams, label, mode, confirmedCount){
   const nameOf = id => { const p = DATA.players.find(p => p.id === id); return p ? p.name : null; };
-  const isFixed6 = mode === 'fixed6' && confirmedCount >= 15 && confirmedCount <= 17;
-  const colors = ['🔵', '🟠', '🟢', '🟣'];
-  const lines = ['🏐 *OPÇÃO ' + label + '*'];
-  teams.forEach((team, idx) => {
-    const names = team.map(nameOf).filter(Boolean);
-    if(!names.length) return;
-    lines.push('');
-    lines.push(isFixed6 && idx === 2
-      ? '⏳ *AGUARDANDO COMPLETAR* (' + names.length + ')'
-      : colors[idx % colors.length] + ' *TIME ' + (idx + 1) + '* (' + names.length + ')');
-    names.forEach(n => lines.push('▪️ ' + n));
-  });
-  return lines.join('\n');
+  const cols = teams.map(team => team.map(nameOf).filter(Boolean)).filter(c => c.length);
+  const width = Math.max.apply(null, cols.map(c => Math.max.apply(null, c.map(n => n.length)))) + 2;
+  const rows = Math.max.apply(null, cols.map(c => c.length));
+  const lines = [];
+  for(let r = 0; r < rows; r++){
+    lines.push(cols.map((c, i) => {
+      const n = c[r] || '';
+      return i === cols.length - 1 ? n : n + ' '.repeat(Math.max(0, width - n.length));
+    }).join('').replace(/\s+$/, ''));
+  }
+  return '*OPÇÃO ' + label + '*\n```' + lines.join('\n') + '```';
 }
 
 function renderVoteOptions(){
   const session = getCurrentSession();
   const mode = session ? (session.teamMode || 'balanced') : 'balanced';
   const confirmedCount = session ? session.entries.filter(e => e.status === 'confirmed').length : 0;
-  const labels = ['A', 'B', 'C'];
+  const labels = ['1', '2', '3'];
   let html = '';
   voteOptions.forEach((teams, i) => {
     const text = buildVoteOptionText(teams, labels[i], mode, confirmedCount);
     html += `<div class="card" style="margin-bottom:10px;">
       <p class="card-title">Opção ${labels[i]}</p>
-      <div class="summary-box" style="margin-bottom:8px;">${escapeHtml(text)}</div>
+      <div class="summary-box" style="margin-bottom:8px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;white-space:pre;overflow-x:auto;">${escapeHtml(text.split('\n').slice(1).join('\n').replace(/```/g,''))}</div>
       <div class="row-actions">
         <button class="btn btn-ghost btn-sm" style="flex:1" onclick="copyVoteOption(${i})">📋 Copiar</button>
         <button class="btn btn-coral btn-sm" style="flex:1" onclick="useVoteOption(${i})">✔ Usar esta</button>
@@ -1557,7 +1555,7 @@ async function copyVoteOption(i){
   if(!session || !voteOptions[i]) return;
   const mode = session.teamMode || 'balanced';
   const count = session.entries.filter(e => e.status === 'confirmed').length;
-  const ok = await copyTextToClipboard(buildVoteOptionText(voteOptions[i], ['A','B','C'][i], mode, count));
+  const ok = await copyTextToClipboard(buildVoteOptionText(voteOptions[i], ['1','2','3'][i], mode, count));
   showToast(ok ? 'Opção copiada! Cole no WhatsApp.' : 'Não consegui copiar neste aparelho.', 3500);
 }
 
@@ -1566,8 +1564,8 @@ async function copyAllVoteOptions(){
   if(!session || !voteOptions.length) return;
   const mode = session.teamMode || 'balanced';
   const count = session.entries.filter(e => e.status === 'confirmed').length;
-  const header = '🗳️ *VOTAÇÃO DOS TIMES — ' + formatDate(session.date) + '*\nEscolha a opção que achar mais justa:\n';
-  const body = voteOptions.map((t, i) => buildVoteOptionText(t, ['A','B','C'][i], mode, count)).join('\n\n— — — — —\n\n');
+  const header = '🗳️ *VOTAÇÃO DOS TIMES — ' + formatDate(session.date) + '*\n';
+  const body = voteOptions.map((t, i) => buildVoteOptionText(t, ['1','2','3'][i], mode, count)).join('\n\n');
   const ok = await copyTextToClipboard(header + '\n' + body);
   showToast(ok ? 'As 3 opções foram copiadas! Cole no WhatsApp.' : 'Não consegui copiar neste aparelho.', 3500);
 }
@@ -1576,13 +1574,13 @@ async function useVoteOption(i){
   requireAdmin('vote', async ()=>{
     const session = getCurrentSession();
     if(!session || !voteOptions[i]) return;
-    if(!confirm('Usar a opção ' + ['A','B','C'][i] + ' como os times oficiais do jogo?')) return;
+    if(!confirm('Usar a opção ' + ['1','2','3'][i] + ' como os times oficiais do jogo?')) return;
     session.teams = voteOptions[i];
     session.votedTeamsKey = session.entries.filter(e => e.status === 'confirmed').map(e => e.playerId).sort().join(',');
     await saveData();
     closeModal('modalVote');
     render();
-    showToast('Opção ' + ['A','B','C'][i] + ' definida como os times do jogo! ✔', 4000);
+    showToast('Opção ' + ['1','2','3'][i] + ' definida como os times do jogo! ✔', 4000);
   });
 }
 
