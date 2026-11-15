@@ -1475,19 +1475,19 @@ function buildVoteOptions(players, mode, tries){
   return chosen.map(o => o.teams);
 }
 
-/** Texto de uma opção: tabela compacta (um time por coluna), só nomes, em fonte monoespaçada no WhatsApp. */
+/** Texto de uma opção: tabela com divisórias (um time por coluna), só nomes, em fonte monoespaçada no WhatsApp. */
 function buildVoteOptionText(teams, label, mode, confirmedCount){
   const nameOf = id => { const p = DATA.players.find(p => p.id === id); return p ? p.name : null; };
   const cols = teams.map(team => team.map(nameOf).filter(Boolean)).filter(c => c.length);
-  const width = Math.max.apply(null, cols.map(c => Math.max.apply(null, c.map(n => n.length)))) + 2;
+  const widths = cols.map(c => Math.max.apply(null, c.map(n => n.length)));
   const rows = Math.max.apply(null, cols.map(c => c.length));
-  const lines = [];
+  const pad = (n, w) => n + ' '.repeat(Math.max(0, w - n.length));
+  const rule = (joint) => widths.map(w => '─'.repeat(w + 2)).join(joint);
+  const lines = [rule('┬')];
   for(let r = 0; r < rows; r++){
-    lines.push(cols.map((c, i) => {
-      const n = c[r] || '';
-      return i === cols.length - 1 ? n : n + ' '.repeat(Math.max(0, width - n.length));
-    }).join('').replace(/\s+$/, ''));
+    lines.push(cols.map((c, i) => ' ' + pad(c[r] || '', widths[i]) + ' ').join('│').replace(/\s+$/, ''));
   }
+  lines.push(rule('┴'));
   return '*OPÇÃO ' + label + '*\n```' + lines.join('\n') + '```';
 }
 
