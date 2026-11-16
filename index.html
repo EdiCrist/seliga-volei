@@ -1495,7 +1495,7 @@ function renderVoteOptions(){
   const session = getCurrentSession();
   const mode = session ? (session.teamMode || 'balanced') : 'balanced';
   const confirmedCount = session ? session.entries.filter(e => e.status === 'confirmed').length : 0;
-  const labels = ['1', '2', '3'];
+  const labels = ['A', 'B', 'C'];
   let html = '';
   voteOptions.forEach((teams, i) => {
     const text = buildVoteOptionText(teams, labels[i], mode, confirmedCount);
@@ -1508,7 +1508,8 @@ function renderVoteOptions(){
       </div>
     </div>`;
   });
-  html += `<button class="btn btn-ghost btn-sm btn-block" onclick="copyAllVoteOptions()">📋 Copiar as 3 opções juntas</button>`;
+  html += `<button class="btn btn-coral btn-sm btn-block" style="margin-bottom:8px" onclick="shareVoteImage()">🖼️ Gerar imagem das 3 opções</button>`;
+  html += `<button class="btn btn-ghost btn-sm btn-block" onclick="copyAllVoteOptions()">📋 Copiar as 3 opções em texto</button>`;
   document.getElementById('voteBody').innerHTML = html;
 }
 
@@ -1550,12 +1551,93 @@ async function copyTextToClipboard(text){
   }catch(e){ return false; }
 }
 
+function weekdayName(d){
+  try{ const [y,m,day] = d.split('-').map(Number); const w = new Date(y, m - 1, day).toLocaleDateString('pt-BR', { weekday:'long' }); return w.charAt(0).toUpperCase() + w.slice(1); }catch(e){ return ''; }
+}
+
+/** Desenha as 3 opções numa imagem vertical (PNG) pra mandar no WhatsApp. */
+function buildVoteImageCanvas(){
+  const session = getCurrentSession();
+  const nameOf = id => { const p = DATA.players.find(p => p.id === id); return p ? p.name : ''; };
+  const opts = voteOptions.map(t => t.map(team => team.map(nameOf).filter(Boolean)).filter(c => c.length));
+  const total = session.entries.filter(e => e.status === 'confirmed').length;
+  const W = 1080, PAD = 48, GAP = 16, INNER = 28, ROW = 62, HEAD = 56, TITLE = 70;
+  const teamColors = ['#2f80ed', '#f2994a', '#27ae60', '#9b51e0'];
+  const blocks = opts.map(cols => {
+    const rows = Math.max.apply(null, cols.map(c => c.length));
+    return { cols, rows, h: INNER + TITLE + HEAD + rows * ROW + INNER };
+  });
+  const H = 48 + 70 + 50 + 34 + blocks.reduce((a, b) => a + b.h + 26, 0) + 70;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const rr = (x, y, w, h, r) => { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); };
+  const font = (px, bold) => (bold ? 'bold ' : '') + px + 'px Arial, Helvetica, sans-serif';
+  const fit = (txt, maxW, px, bold) => { let s = px; ctx.font = font(s, bold); while(s > 18 && ctx.measureText(txt).width > maxW){ s -= 2; ctx.font = font(s, bold); } };
+  ctx.fillStyle = '#0f2a24'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  let y = 48 + 35;
+  ctx.fillStyle = '#ffffff'; ctx.font = font(46, true); ctx.fillText('🏐 Votação dos times', W / 2, y);
+  y += 62; ctx.fillStyle = '#9fd4c4'; ctx.font = font(30, false);
+  ctx.fillText(weekdayName(session.date) + ' · ' + formatDate(session.date) + ' · ' + total + ' confirmados', W / 2, y);
+  y += 17 + 34;
+  blocks.forEach((b, i) => {
+    const x0 = PAD, w0 = W - PAD * 2;
+    ctx.fillStyle = '#173b33'; rr(x0, y, w0, b.h, 24); ctx.fill();
+    ctx.textAlign = 'left'; ctx.fillStyle = '#ffffff'; ctx.font = font(40, true);
+    ctx.fillText('Opção ' + ['A','B','C'][i], x0 + INNER, y + INNER + TITLE / 2);
+    const n = b.cols.length, innerW = w0 - INNER * 2, cw = (innerW - GAP * (n - 1)) / n;
+    const top = y + INNER + TITLE;
+    b.cols.forEach((c, k) => {
+      const cx = x0 + INNER + k * (cw + GAP);
+      ctx.fillStyle = '#0f2a24'; rr(cx, top, cw, HEAD + b.rows * ROW, 16); ctx.fill();
+      ctx.save(); rr(cx, top, cw, HEAD + b.rows * ROW, 16); ctx.clip();
+      ctx.fillStyle = teamColors[k % teamColors.length]; ctx.fillRect(cx, top, cw, HEAD);
+      ctx.restore();
+      ctx.textAlign = 'center'; ctx.fillStyle = '#ffffff'; ctx.font = font(28, true);
+      ctx.fillText('Time ' + (k + 1), cx + cw / 2, top + HEAD / 2);
+      c.forEach((name, r) => {
+        const ry = top + HEAD + r * ROW;
+        if(r > 0){ ctx.fillStyle = '#1f4a40'; ctx.fillRect(cx, ry, cw, 1); }
+        ctx.fillStyle = '#ffffff'; fit(name, cw - 20, 34, false);
+        ctx.fillText(name, cx + cw / 2, ry + ROW / 2);
+      });
+    });
+    y += b.h + 26;
+  });
+  ctx.textAlign = 'center'; ctx.fillStyle = '#9fd4c4'; ctx.font = font(28, false);
+  ctx.fillText('Vote na enquete: Opção A, B ou C', W / 2, y + 22);
+  return cv;
+}
+
+async function shareVoteImage(){
+  const session = getCurrentSession();
+  if(!session || !voteOptions.length){ showToast('Gere as opções primeiro.'); return; }
+  let cv;
+  try{ cv = buildVoteImageCanvas(); }catch(e){ showToast('Não consegui desenhar a imagem neste aparelho.', 4000); return; }
+  const fileName = 'votacao-times-' + (session.date || 'jogo') + '.png';
+  cv.toBlob(async blob => {
+    if(!blob){ showToast('Não consegui gerar a imagem.', 4000); return; }
+    try{
+      const file = new File([blob], fileName, { type: 'image/png' });
+      if(navigator.canShare && navigator.canShare({ files: [file] })){
+        await navigator.share({ files: [file] });
+        return;
+      }
+    }catch(e){ if(e && e.name === 'AbortError') return; }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = fileName;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    showToast('Imagem salva! Mande no grupo do WhatsApp.', 4000);
+  }, 'image/png');
+}
+
 async function copyVoteOption(i){
   const session = getCurrentSession();
   if(!session || !voteOptions[i]) return;
   const mode = session.teamMode || 'balanced';
   const count = session.entries.filter(e => e.status === 'confirmed').length;
-  const ok = await copyTextToClipboard(buildVoteOptionText(voteOptions[i], ['1','2','3'][i], mode, count));
+  const ok = await copyTextToClipboard(buildVoteOptionText(voteOptions[i], ['A','B','C'][i], mode, count));
   showToast(ok ? 'Opção copiada! Cole no WhatsApp.' : 'Não consegui copiar neste aparelho.', 3500);
 }
 
@@ -1565,7 +1647,7 @@ async function copyAllVoteOptions(){
   const mode = session.teamMode || 'balanced';
   const count = session.entries.filter(e => e.status === 'confirmed').length;
   const header = '🗳️ *VOTAÇÃO DOS TIMES — ' + formatDate(session.date) + '*\n';
-  const body = voteOptions.map((t, i) => buildVoteOptionText(t, ['1','2','3'][i], mode, count)).join('\n\n');
+  const body = voteOptions.map((t, i) => buildVoteOptionText(t, ['A','B','C'][i], mode, count)).join('\n\n');
   const ok = await copyTextToClipboard(header + '\n' + body);
   showToast(ok ? 'As 3 opções foram copiadas! Cole no WhatsApp.' : 'Não consegui copiar neste aparelho.', 3500);
 }
@@ -1574,13 +1656,13 @@ async function useVoteOption(i){
   requireAdmin('vote', async ()=>{
     const session = getCurrentSession();
     if(!session || !voteOptions[i]) return;
-    if(!confirm('Usar a opção ' + ['1','2','3'][i] + ' como os times oficiais do jogo?')) return;
+    if(!confirm('Usar a opção ' + ['A','B','C'][i] + ' como os times oficiais do jogo?')) return;
     session.teams = voteOptions[i];
     session.votedTeamsKey = session.entries.filter(e => e.status === 'confirmed').map(e => e.playerId).sort().join(',');
     await saveData();
     closeModal('modalVote');
     render();
-    showToast('Opção ' + ['1','2','3'][i] + ' definida como os times do jogo! ✔', 4000);
+    showToast('Opção ' + ['A','B','C'][i] + ' definida como os times do jogo! ✔', 4000);
   });
 }
 
