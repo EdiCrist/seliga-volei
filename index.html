@@ -314,6 +314,13 @@
       <label>Nível</label>
       <div class="star-picker" id="npStars"></div>
     </div>
+    <div class="field" id="npGenderField">
+      <label>Sexo (só a organização vê · usado para equilibrar os times)</label>
+      <div class="row-actions">
+        <button type="button" class="btn btn-ghost btn-sm" style="flex:1" id="npGM" onclick="setNewPlayerGender('M')">♂ Homem</button>
+        <button type="button" class="btn btn-ghost btn-sm" style="flex:1" id="npGF" onclick="setNewPlayerGender('F')">♀ Mulher</button>
+      </div>
+    </div>
     <div class="modal-actions">
       <button class="btn btn-ghost" style="flex:1" onclick="closeModal('modalPlayer')">Cancelar</button>
       <button class="btn btn-coral" id="npSaveBtn" style="flex:1" onclick="savePlayer()">Salvar</button>
@@ -585,6 +592,7 @@ let isAdmin = false;
 let pinPurpose = null;
 let editingPlayerStars = 0;
 let newPlayerStars = 3;
+let newPlayerGender = null;
 
 function uid(){ return Math.random().toString(36).slice(2,10); }
 
@@ -951,7 +959,10 @@ async function createSession(){
 /* ---------- PLAYERS ---------- */
 function openNewPlayer(){
   newPlayerStars = 3;
+  newPlayerGender = null;
   document.getElementById('npName').value = '';
+  document.getElementById('npGenderField').style.display = isAdmin ? '' : 'none';
+  refreshNewPlayerGender();
   const starsField = document.getElementById('npStarsField');
   if(isAdmin){
     starsField.style.display = '';
@@ -962,6 +973,25 @@ function openNewPlayer(){
     document.getElementById('npSub').textContent = 'A organização vai avaliar o nível depois.';
   }
   openModal('modalPlayer');
+}
+
+function refreshNewPlayerGender(){
+  const m = document.getElementById('npGM'), f = document.getElementById('npGF');
+  if(m) m.className = 'btn btn-sm ' + (newPlayerGender === 'M' ? 'btn-coral' : 'btn-ghost');
+  if(f) f.className = 'btn btn-sm ' + (newPlayerGender === 'F' ? 'btn-coral' : 'btn-ghost');
+  if(m) m.style.flex = '1'; if(f) f.style.flex = '1';
+}
+function setNewPlayerGender(g){ newPlayerGender = (newPlayerGender === g) ? null : g; refreshNewPlayerGender(); }
+
+async function setPlayerGender(id, g){
+  requireAdmin('setGender', async ()=>{
+    const p = DATA.players.find(p => p.id === id);
+    if(!p) return;
+    p.gender = (p.gender === g) ? null : g;
+    autoUpdateTeams(getCurrentSession());
+    await saveData();
+    render();
+  });
 }
 
 function buildStarPicker(){
@@ -991,7 +1021,7 @@ async function savePlayer(){
   const btn = document.getElementById('npSaveBtn');
   if(btn){ btn.disabled = true; btn.textContent = 'Salvando...'; }
   try{
-    DATA.players.push({ id: uid(), name, stars: newPlayerStars, balance: 0, rated: isAdmin });
+    DATA.players.push({ id: uid(), name, stars: newPlayerStars, balance: 0, rated: isAdmin, gender: isAdmin ? newPlayerGender : null });
     await saveData();
     closeModal('modalPlayer');
     render();
@@ -1347,16 +1377,47 @@ async function toggleConfirm(playerId){
 }
 
 /* ---------- TEAMS ---------- */
+/**
+ * Divide jogadores em N times equilibrando, ao mesmo tempo, o SEXO e o NÍVEL (estrelas).
+ * Cada grupo (homens, mulheres, sem marca) é repartido por igual entre os times (diferença máx. de 1)
+ * e, dentro de cada grupo, o jogador mais forte vai pro time de menor soma de estrelas.
+ * Os "sobrando" são distribuídos pros times com menos gente, então o tamanho dos times também fica parelho.
+ */
+function distributeByGender(list, numTeams, shuffle){
+  const teams = Array.from({length: numTeams}, () => ({ ids: [], sum: 0, count: {} }));
+  const groups = { M: [], F: [], U: [] };
+  list.forEach(p => groups[p.gender === 'M' || p.gender === 'F' ? p.gender : 'U'].push(p));
+  const byStars = (a, b) => b.stars - a.stars || (shuffle ? (Math.random() - 0.5) : a.name.localeCompare(b.name));
+  ['M', 'F', 'U'].forEach(g => {
+    groups[g].sort(byStars).forEach(p => {
+      const minG = Math.min(...teams.map(t => t.count[g] || 0));
+      let cands = teams.filter(t => (t.count[g] || 0) === minG);
+      const minSize = Math.min(...cands.map(t => t.ids.length));
+      cands = cands.filter(t => t.ids.length === minSize);
+      const minSum = Math.min(...cands.map(t => t.sum));
+      const near = cands.filter(t => t.sum <= minSum + (shuffle ? 1 : 0.0001));
+      const pick = shuffle ? near[Math.floor(Math.random() * near.length)] : near[0];
+      pick.ids.push(p.id); pick.sum += p.stars; pick.count[g] = (pick.count[g] || 0) + 1;
+    });
+  });
+  return teams.map(t => t.ids);
+}
+
 function buildTeamsFromPlayers(players, opts){
   opts = opts || {};
   const list = players.slice();
   list.sort((a,b)=> b.stars - a.stars || (opts.shuffle ? (Math.random()-0.5) : a.name.localeCompare(b.name)));
   if(!list.length) return [];
+  const hasGender = list.some(p => p.gender === 'M' || p.gender === 'F');
 
   if(opts.mode === 'fixed6' && list.length >= 15 && list.length <= 17){
-    const teams = [[],[],[]];
     const first12 = list.slice(0, 12);
     const rest = list.slice(12);
+    if(hasGender){
+      const two = distributeByGender(first12, 2, opts.shuffle);
+      return [two[0], two[1], rest.map(p => p.id)];
+    }
+    const teams = [[],[],[]];
     let dir = 1, t = 0;
     for(const p of first12){
       teams[t].push(p.id);
@@ -1369,6 +1430,7 @@ function buildTeamsFromPlayers(players, opts){
   }
 
   const numTeams = list.length <= 14 ? 2 : 3;
+  if(hasGender) return distributeByGender(list, numTeams, opts.shuffle);
   const teams = Array.from({length: numTeams}, ()=>[]);
   let dir = 1, t = 0;
   for(const p of list){
@@ -3454,8 +3516,8 @@ function render(){
         const avg = players.length ? (players.reduce((s,p)=>s+p.stars,0)/players.length).toFixed(1) : '0';
         const isPartial = mode === 'fixed6' && idx === 2 && confirmedCount >= 15 && confirmedCount <= 17;
         html += `<div class="team-card">
-          <div class="team-head"><span class="name">${isPartial ? 'Aguardando completar' : 'Time ' + (idx+1)}</span>${isAdmin ? `<span class="avg">nível médio ${avg} ★</span>` : ''}</div>
-          <div class="team-members">${players.map(p=>`${p.name}${isAdmin ? ' ' + '★'.repeat(p.stars) : ''}${isAdmin && !p.rated ? ' ⚠️' : ''}`).join('<br>')}</div>
+          <div class="team-head"><span class="name">${isPartial ? 'Aguardando completar' : 'Time ' + (idx+1)}</span>${isAdmin ? `<span class="avg">${players.filter(p=>p.gender==='M').length}♂ ${players.filter(p=>p.gender==='F').length}♀ · nível ${avg} ★</span>` : ''}</div>
+          <div class="team-members">${players.map(p=>`${p.name}${isAdmin ? ' ' + (p.gender==='M'?'♂':p.gender==='F'?'♀':'') + ' ' + '★'.repeat(p.stars) : ''}${isAdmin && !p.rated ? ' ⚠️' : ''}`).join('<br>')}</div>
         </div>`;
       });
       html += `</div>`;
@@ -3484,6 +3546,10 @@ function render(){
     }
     html += `<div class="card"><p class="card-title">Todos os jogadores (${DATA.players.length})</p>`;
     if(!isAdmin) html += `<p style="font-size:12px; opacity:0.6; margin:-4px 0 12px;">O nível dos jogadores é visível só para a organização.</p>`;
+    if(isAdmin){
+      const noGender = DATA.players.filter(p => p.gender !== 'M' && p.gender !== 'F').length;
+      html += `<p style="font-size:12px; opacity:0.7; margin:-4px 0 12px;">♂/♀ só você vê: os times saem com a mesma quantidade de homens e mulheres. ${noGender ? `<b>${noGender} sem marcação</b> (entram num grupo à parte).` : '✔ Todos marcados.'}</p>`;
+    }
     if(!DATA.players.length) html += `<div class="empty">Nenhum jogador cadastrado ainda.</div>`;
     const list = isAdmin
       ? DATA.players.slice().sort((a,b)=> (a.rated===b.rated ? 0 : (a.rated ? 1 : -1)) || b.stars-a.stars || a.name.localeCompare(b.name))
@@ -3498,6 +3564,7 @@ function render(){
           <div class="player-name">${p.name}${unrated ? ' <span class="status-pill" style="background:rgba(255,107,107,0.18); color:var(--warn);">⚠️ avaliar</span>' : ''}${isMensalMode && p.isMensalista ? ' <span class="status-pill pill-paid">📅 mensalista</span>' : ''}</div>
           ${isAdmin && hasBalance ? `<div class="receipt-note" style="color:${bal>0?'var(--ok)':'var(--warn)'}">${bal>0 ? `crédito de R$ ${bal.toFixed(2)}` : `deve R$ ${Math.abs(bal).toFixed(2)}`}</div>` : ''}
         </div>
+        ${isAdmin ? `<button class="btn btn-sm ${p.gender==='M'?'btn-coral':'btn-ghost'}" style="padding:4px 8px" onclick="setPlayerGender('${p.id}','M')">♂</button><button class="btn btn-sm ${p.gender==='F'?'btn-coral':'btn-ghost'}" style="padding:4px 8px" onclick="setPlayerGender('${p.id}','F')">♀</button>` : ''}
         ${isAdmin ? renderStars(p.stars, {editable:true, playerId:p.id}) : ''}
         ${isAdmin && isMensalMode ? `<button class="btn ${p.isMensalista?'btn-coral':'btn-ghost'} btn-sm" onclick="toggleMensalista('${p.id}')">${p.isMensalista?'✓ Mensalista':'Marcar mensalista'}</button>` : ''}
         ${isAdmin ? `<button class="btn btn-ghost btn-sm" onclick="renamePlayer('${p.id}')">✏️</button>` : ''}
